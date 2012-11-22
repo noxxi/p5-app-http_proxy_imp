@@ -1,3 +1,4 @@
+0.3 document and fix behavior on SIGUSR1, add debug toggling for SIGUSR2
 0.2 quick fix to bin/http_proxy_imp which still used method run instead of start
 0.1 initial version 
     moved from Net::Inspect tools/http_inspection_proxy to own namespace

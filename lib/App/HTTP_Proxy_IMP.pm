@@ -11,11 +11,11 @@ use App::HTTP_Proxy_IMP::Request;
 use App::HTTP_Proxy_IMP::Relay;
 use AnyEvent;
 use Getopt::Long qw(:config posix_default bundling);
-use App::HTTP_Proxy_IMP::Debug qw($DEBUG $DEBUG_RX);
+use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG $DEBUG_RX);
 use Net::Inspect::Debug qw(%TRACE);
 use Carp 'croak';
 
-our $VERSION = 0.2;
+our $VERSION = 0.3;
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -103,12 +103,26 @@ sub start {
     }
 
     # on SIGUSR1 dump state of all relays
-    my $sw = AnyEvent->signal( signal => 'USR1', cb => sub {
+    my $usr1 = AnyEvent->signal( signal => 'USR1', cb => sub {
+	# temporaly enable debugging, even if off
+	my $od = $DEBUG;
+	$DEBUG = 1;
 	debug("-------- active relays ------------------");
 	my @relays = App::HTTP_Proxy_IMP::Relay->relays;
 	debug(" * NO RELAYS") if ! @relays;
 	$_->dump_state for(@relays);
 	debug("-----------------------------------------");
+	$DEBUG = $od;
+    });
+
+    my $usr2 = AnyEvent->signal( signal => 'USR2', cb => sub {
+	if ( $DEBUG ) {
+	    debug("disable debugging");
+	    $DEBUG = 0;
+	} else {
+	    $DEBUG = 1;
+	    debug("enable debugging");
+	}
     });
 
     return 1 if defined wantarray;
@@ -309,6 +323,22 @@ If no return value is expected from this method it will enter into an endless
 loop using C<< AnyEvent->condvar->recv >>.
 If a value is expected it will return 1, and the caller hast to enter the
 AnyEvent mainloop itself.
+
+=head2 Reaction to Signals
+
+The installs some signal handlers:
+
+=over 4
+
+=item SIGUSR1
+
+Dump current state to STDERR, e.g. active connections and their state.
+
+=item SIGUSR2
+
+Toggles debugging (e.g. enable|disable).
+
+=back
 
 =head1 AUTHOR
 
