@@ -4,4 +4,4 @@
 use strict;
 use warnings;
 use App::HTTP_Proxy_IMP;
-App::HTTP_Proxy_IMP->run(@ARGV);
+App::HTTP_Proxy_IMP->start(@ARGV);

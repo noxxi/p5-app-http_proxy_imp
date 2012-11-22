@@ -15,7 +15,7 @@ use App::HTTP_Proxy_IMP::Debug qw($DEBUG $DEBUG_RX);
 use Net::Inspect::Debug qw(%TRACE);
 use Carp 'croak';
 
-our $VERSION = 0.1;
+our $VERSION = 0.2;
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
