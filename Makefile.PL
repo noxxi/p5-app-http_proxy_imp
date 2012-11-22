@@ -1,0 +1,13 @@
+use ExtUtils::MakeMaker;
+require 5.10.0;
+WriteMakefile(
+    NAME => 'App::HTTP_Proxy_IMP',
+    VERSION_FROM => 'lib/App/HTTP_Proxy_IMP.pm',
+    PREREQ_PM => {
+	'Net::Inspect' => 0.22,
+	'Net::IMP' => 0.45,
+	'AnyEvent' => 6.12,
+    },
+    EXE_FILES => [ 'bin/http_proxy_imp' ],
+    LICENSE => 'perl',
+);
