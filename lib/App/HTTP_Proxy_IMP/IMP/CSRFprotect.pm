@@ -1,15 +1,5 @@
-# CSRF protection based on idea of 
-# Automatic and Precise Client-Side Protection against CSRF Attacks
-# https://lirias.kuleuven.be/bitstream/123456789/311551/1/paper.pdf
-#
-# remove Cookies and Authorization info from request to domain T, if
-# - Referer/Origin is missing or points to different domain O 
-# - and there is no trusted relationship between domains O and T 
-# Trusted relationship means, if either
-# - T and O share the same top level domain, which is not a global TLD
-# - or there was an earlier request to T, which redirected to O
-# - or there was an earlier form submit (e.g. POST or GET with query_string)
-#   to O, originating from T (e.g. T as Referer/Origin)
+# PoC for CSRF protection
+# see pod at the end for detailed description of the idea and references
 
 use strict;
 use warnings;
@@ -24,11 +14,6 @@ use fields (
 
 use Net::IMP qw(:DEFAULT :log);
 use Net::IMP::Debug;
-
-# FIXME - should be database backed and maybe shared between processes
-# and should be expire after a while, unless refreshed
-my %CD_TRUST;   # {target}{origin} - eg. request to target trusted from origin
-my %CD_UNTRUST; # {target}{origin} - yet untrusted cross domain relation
 
 sub USED_RTYPES { return (
     IMP_REPLACE, # remove Cookie/Authorization header
@@ -73,6 +58,32 @@ sub data {
     }
 
     $self->run_callback(@rv);
+}
+
+{
+    # FIXME - should expire after a short time
+    # FIXME - for multi-process environments it needs to be shared 
+    #         between processes
+    # DELEGATION{FROM}{TO}: e.g. FROM delegated to TO by
+    #  - having a POST request to TO with origin/referer FROM
+    #  - having a redirect to TO in response from FROM
+    my %DELEGATION; 
+
+    sub _delegate {
+	my ($origin,$target,$why) = @_;
+	if ( $DELEGATION{$origin}{$target} ) {
+	    debug("refresh delegation $origin -> $target ($why)");
+	    $DELEGATION{$origin}{$target} = 1;
+	} else {
+	    debug("add delegation $origin -> $target ($why)");
+	    $DELEGATION{$origin}{$target} = 1;
+	}
+    }
+
+    sub _delegation_exists {
+	my ($origin,$target) = @_;
+	return $DELEGATION{$origin}{$target};
+    }
 }
 
 # extract target and origin domain
@@ -126,47 +137,38 @@ sub _modify_rqhdr {
 	    return 
 	}
 
-	# check established trust through previous cross-domain handshake
-	if ( $CD_TRUST{$target}{$origin} || $CD_TRUST{$origin}{$target} ) {
-	    debug("trusted request from $origin to $target");
-	    $CD_TRUST{$target}{$origin} = 1; # refresh
-	    return 
-	} elsif ( delete $CD_UNTRUST{$origin}{$target} ) {
-	    # we had a request in the opposite direction
-	    # trust established
-	    debug("trust established between O=$origin and T=$target due to RQ(to=O,from=T) and RQ(to=T,from=O)");
-	    $CD_TRUST{$target}{$origin} = 1;
-	    return;
+	# check if this is a delegation (POST)
+	if ( $hdr =~m{\APOST } ) {
+	    _delegate($origin,$target,'POST');
 	}
 
-	# no trust (yet) 
-	if ( $hdr =~m{\A(POST |GET .*\?\S)} ) {
-	    # formular data: either POST request or GET with query_string
-	    # store relation hoping that it gets verified from the other side
-	    debug("(yet) untrusted formular request from $origin to $target");
-	    $CD_UNTRUST{$target}{$origin} = 1;
-	} else {
-	    # just normal cross-domain requests
-	    debug("untrusted non-formular request from $origin to $target");
+	# consider the request trused if we got an earlier delegation from 
+	# $target to $origin (e.g. in the other direction)
+	if ( _delegation_exists($target,$origin)) {
+	    debug("trusted request from $origin to $target (earlier delegation)");
+	    return 
 	}
     }
 
-    # remove cookies and authorization info, because there is no 
-    # trusted cross-domain relation
-    my $rv = undef;
+    # remove cookies, because there is no cross-domain trust
+    # we should remove authorization header too, but then access to the
+    # protected site will probably not be available at all (see BUGS section)
     my @del;
-    push @del,$1 while ( $hdr =~s{^(Cookie|Cookie2|Authorization):[ \t]*(.*(?:\n[ \t].*)*)\n}{}im );
+    push @del,$1 while ( $hdr =~s{^(Cookie|Cookie2):[ \t]*(.*(?:\n[ \t].*)*)\n}{}im );
     if (@del) {
-	$rv = $hdr;
 	$self->run_callback([ 
 	    IMP_LOG,0,0,0,IMP_LOG_INFO,
 	    "removed cross-origin session credentials (@del) for request @origin -> @target" 
 	]);
+	# return changed header
+	return $hdr; 
     }
-    return $rv;
+
+    # nothing changed
+    return undef;
 }
 
-# find out if response header contains redirect
+# find out if response header contains delegation through a redirect
 sub _analyze_rphdr {
     my ($self,$hdr) = @_;
     # we are only interested in temporal redirects
@@ -185,21 +187,13 @@ sub _analyze_rphdr {
     }
     my $location = $location[0];
     my $target   = $self->{target} or return;
-    return if $target eq $location; # implicit trust
+    return if $target eq $location; # no cross-domain
 
     $target   = _rootdom($target);
     $location = _rootdom($location);
-    return if $target eq $location; # implicit trust same rootdom
+    return if $target eq $location; # not considered cross-domain too
 
-
-
-    if ( $CD_TRUST{$target}{$location} ) {
-	debug("refresh trust between $location and $target");
-	$CD_TRUST{$target}{$location} = 1;
-    } elsif ( delete $CD_UNTRUST{$target}{$location} ) {
-	debug("trust established between L=$location and T=$target due to request(to T,origin L) and redirect(from T,to L)");
-	$CD_TRUST{$target}{$location} = 1;
-    }
+    _delegate($target,$location,'redirect');
 }
 
 sub _gethdr {
@@ -248,12 +242,41 @@ App::HTTP_Proxy_IMP::IMP::CSRFprotect - IMP plugin against CSRF attacks
 
 This plugin attempts to block malicious cross-site requests (CSRF), by removing
 session credentials (Cookie, Cookie2 and Authorization header) from the request,
-if the Origin/Referer of the request is not known or not trusted.
+if the origin of the request is not known or not trusted.
+The origin is determined by checking the Origin or the Referer HTTP-header of
+the request.
 
-An origin O is considered trusted to reach target T, if O it is the same as T,
-both share the same root-domain, or if there was a request from T to O
-contained formular data, followed by a similar request or a redirect from O to
-T.
+An origin O is considered trusted to issue a cross-site request to target T, if
+
+=over 4
+
+=item * 
+
+O is the same as T
+
+=item *
+
+O and T share the same root domain (which should not be a public suffix)
+
+=item *
+
+there was an earlier delegation from T to O
+
+=back
+
+Delegation from T to O means, that
+
+=over 4
+
+=item *
+
+a POST request to target O with origin T
+
+=item *
+
+or a redirect to O within the HTTP response from T
+
+=back
 
 This module is based on ideas described 2011 in the paper
 "Automatic and Precise Client-Side Protection against CSRF Attacks" from
@@ -263,13 +286,18 @@ Philippe De Ryck, Lieven Desmet, Wouter Joosen, and Frank Piessens.
 
 This module is a proof of concept.
 
-Missing essential functionality is the expiring of information about not fully
-trusted relations (e.g. Host A send request to B, but there was not request from
-B to A) after a short time.
+Contrary to the initial goal, currently no Authorization HTTP header will be
+removed. While for session authorization with cookies, there is a fallback page
+on failed authorization, no such page exists for HTTP authorization.
+Instead the HTTP server will issue again and again "407 authorization required"
+because the request would still be Cross-Site or No-Site (e.g. no Origin/Referer
+header) and thus CSRF protection would apply.
+This would not only stop cross-site accesses to the protected site completly,
+but also access from bookmarks et. al. (e.g. No-Site request).
 
-Nice to have would be to expire existing trust relationship after a while, share
-trust relations between processes and store/restore them on program exit and
-start.
+Missing essential functionality is the expiring of information about previous
+delegations after a short time, so that they need to be refreshed before the
+next cross-site request is allowed.
 
 =head1 AUTHOR
 
