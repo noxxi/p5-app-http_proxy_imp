@@ -31,6 +31,12 @@ sub new_factory {
     my ($class,@mod) = @_;
     my @factory;
     for my $module (@mod) {
+	if ( ref($module)) {
+	    # assume it is already an IMP factory object
+	    push @factory, $module;
+	    next;
+	}
+
 	# --filter mod=args
 	my ($mod,$args) = $module =~m{^([a-z][\w:]*)(?:=(.*))?$}i
 	    or die "invalid module $module";

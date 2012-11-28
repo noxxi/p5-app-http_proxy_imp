@@ -1,5 +1,5 @@
 use ExtUtils::MakeMaker;
-require 5.10.0;
+require 5.12.4;
 WriteMakefile(
     NAME => 'App::HTTP_Proxy_IMP',
     VERSION_FROM => 'lib/App/HTTP_Proxy_IMP.pm',

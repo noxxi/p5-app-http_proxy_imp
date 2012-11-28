@@ -1,5 +1,16 @@
-0.3 document and fix behavior on SIGUSR1, add debug toggling for SIGUSR2
-0.2 quick fix to bin/http_proxy_imp which still used method run instead of start
-0.1 initial version 
-    moved from Net::Inspect tools/http_inspection_proxy to own namespace
+0.4 2012-11-28
+- require 5.12.4, 5.10.1 has Socket module w/o inet_ntop etc and because
+  5.10 is end of live there is no motivation to work around it
+- plugin to use can also be given as IMP factory object, not only class name
+
+0.3 2012-11-22
+- document and fix behavior on SIGUSR1, add debug toggling for SIGUSR2
+
+0.2 2012-11-22
+- quick fix to bin/http_proxy_imp which still used method run instead of start
+
+0.1 2012-11-22 
+- initial version, moved from Net::Inspect tools/http_inspection_proxy to 
+  own namespace
+
     

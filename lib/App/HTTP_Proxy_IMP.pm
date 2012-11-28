@@ -15,7 +15,7 @@ use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG $DEBUG_RX);
 use Net::Inspect::Debug qw(%TRACE);
 use Carp 'croak';
 
-our $VERSION = 0.3;
+our $VERSION = 0.4;
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -56,6 +56,12 @@ sub start {
 	my $ns = $self->{impns};
 	my @mod;
 	for my $f (@$filter) {
+	    if ( ref($f) ) {
+		# already factory object
+		push @mod,$f;
+		next;
+	    }
+
 	    my $found;
 	    for my $prefix ('', map { "${_}::" } @$ns) {
 		my $mod = $prefix.$f;
@@ -267,6 +273,7 @@ The following options and its matching cmdline arguments are defined:
 List of IMP filters, which should be used for inspection and modification.
 These can be a fully qualified name, or a short name, which need to be combined
 with one of the given namespace prefixes to get the full name.
+It can also be already an IMP factory object.
 
 The cmdline option can be given multiple times.
 If '-' is given as name on the cmdline all previously defined filters are
