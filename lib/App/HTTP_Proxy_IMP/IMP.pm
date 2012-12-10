@@ -2,29 +2,67 @@ use strict;
 use warnings;
 
 package App::HTTP_Proxy_IMP::IMP;
+use fields (
+    'factory',   # factory from new_factory
+    'api_http',  # use IMP_DATA_HTTP* instead of IMP_DATA_STREAM only
+    'analyzer',  # analyzer from new_analyzer
+    'request',   # privHTTPrequest object (weak ref)
+    # data, which might be modified be current inspection, need to be buffered
+    # until we get the final decision
+    'buf',       # per dir list of [pos,data,type] entries, with pos being the
+		 # position of end of buf relative to input stream
+    'inspos',    # position up to which data got forwarded to inspection (per dir)
+    'canpass',   # can pass up to this position (for pass in future), per dir
+    'prepass',   # canpass is for IMP_PREPASS, not IMP_PASS, per dir
+);
 
 use Net::Inspect::Debug qw(:DEFAULT $DEBUG);
 use Net::IMP::Debug var => \$DEBUG, sub => \&debug;
 use Net::IMP;
-use fields (
-    'factory',   # factory from new_factory
-    'analyzer',  # analyzer from new_analyzer
-    'request',   # privHTTPrequest object (weak ref)
-    # original length of request header
-    # plugin should keep this boundary, e.g. either replace or (pre)pass header
-    # but not replace header with header+body or only part of header
-    'rqhdr_len',
-    'rqhdr_buf', # needed to buffer request header if handled in chunks
-    'rqhdr_chg', # set if the header got changed
-    # per dir data, e.g. buf[0],pos[1]...
-    'buf',       # buffered data per dir
-    'pos',       # base position of buf relative to input stream
-    'canpass',   # can pass up to this position (for pass in future)
-    'prepass',   # canpass is for IMP_PREPASS, not IMP_PASS
-    'passed',    # offset up to which date were passed w/o inspecting them
+use Scalar::Util qw(weaken dualvar);
+use Carp;
+
+{
+    use Exporter 'import';
+    our %EXPORT_TAGS = ( dtypes => [
+	'IMP_DATA_MESSAGE_HDR',
+	'IMP_DATA_CHUNK_HDR',
+	'IMP_DATA_CHUNK_TRAILER',
+	'IMP_DATA_STREAM', # reexport for convinience
+    ]);
+    Exporter::export_ok_tags('dtypes');
+}
+
+use constant {
+    IMP_DATA_MESSAGE_HDR   => dualvar(0x10,'http.message.hdr'),
+    IMP_DATA_CHUNK_HDR     => dualvar(0x11,'http.chunk.hdr'),
+    IMP_DATA_CHUNK_TRAILER => dualvar(0x12,'http.chunk.trailer'),
+};
+
+my @rtypes = (
+    IMP_PASS,
+    IMP_PREPASS,
+    IMP_REPLACE,
+    IMP_TOSENDER,
+    IMP_DENY,
+    IMP_LOG,
+    IMP_ACCTFIELD,
 );
 
-use Scalar::Util 'weaken';
+my @dtypes = (
+    # we want to use a http interface
+    IMP_DATA_MESSAGE_HDR,
+    IMP_DATA_CHUNK_HDR,
+    IMP_DATA_CHUNK_TRAILER,
+    # request/response body data are stream data
+    IMP_DATA_STREAM,
+);
+@dtypes = sort @dtypes;
+
+sub can_modify_response {
+    my $self = shift;
+    return grep { $_ ~~ [ IMP_REPLACE, IMP_TOSENDER ] } $self->{analyzer}->USED_RTYPES;
+}
 
 # create a new factory object
 sub new_factory {
@@ -43,15 +81,8 @@ sub new_factory {
 	eval "require $mod" or die "cannot load $mod args=$args: $@";
 	my %args = $mod->str2cfg($args//'');
 	my $factory = $mod->new_factory(
-	    rtypes => [
-		IMP_PASS,
-		IMP_PREPASS,
-		IMP_REPLACE,
-		IMP_TOSENDER,
-		IMP_DENY,
-		IMP_LOG,
-		IMP_ACCTFIELD,
-	    ],
+	    rtypes => \@rtypes,
+	    dtypes => [ @dtypes ],
 	    %args
 	) or croak("cannot create Net::IMP factory for $mod");
 	push @factory,$factory;
@@ -66,14 +97,32 @@ sub new_factory {
 	@factory = $cascade;
     }
 
-    my $self = fields::new($class);
+    my App::HTTP_Proxy_IMP::IMP $self = fields::new($class);
     $self->{factory} = $factory[0];
+
+    my @dt = sort $self->{factory}->supported_dtypes(\@dtypes);
+    if ( ! @dt ) {
+	croak("no common supported data types between ".
+	    __PACKAGE__." and plugins");
+    } elsif ( "@dt" eq "@dtypes" ) {
+	# can work with HTTP request types
+	debug("full HTTP request interface supported");
+	$self->{api_http} = 1;
+    } elsif ( @dt != 1 or $dt[0] != IMP_DATA_STREAM ) {
+	croak("strange configuration in plugins, supported types = @dt");
+    } else {
+	# only stream interface is supported
+	debug("only stream interface supported");
+	$self->{api_http} = 0;
+    }
+	
     return $self;
 }
 
 # create a new analyzer based on the factory
 sub new_analyzer {
-    my ($factory,$request,$meta) = @_;
+    my App::HTTP_Proxy_IMP::IMP $factory = shift;
+    my ($request,$meta) = @_;
 
     # IMP plugins use different schema in meta than Net::Inspect
     my %meta = %$meta;
@@ -83,18 +132,15 @@ sub new_analyzer {
     );
     my $anl = $factory->{factory}->new_analyzer( meta => \%meta );
 
-    my $self = fields::new(ref($factory));
+    my App::HTTP_Proxy_IMP::IMP $self = fields::new(ref($factory));
     %$self = (
 	request   => $request,
+	api_http  => $factory->{api_http},
 	analyzer  => $anl,
-	buf       => ['',''],
-	pos       => [0,0],
+	buf       => [[ [0,'',undef] ],[ [0,'',undef] ]],
+	inspos    => [0,0],
 	canpass   => [0,0],
 	prepass   => [0,0],
-	passed    => [undef,undef],
-	rqhdr_len => 0,
-	rqhdr_buf => '',
-	rqhdr_chg => '',
     );
     weaken($self->{request});
     weaken( my $wself = $self );
@@ -104,77 +150,175 @@ sub new_analyzer {
 }
 
 # process data
+# called from Request.pm
 # if we had IMP_PASS or IMP_PREPASS with an offset into the future we might
 # forward received data instead or parallel to sending them to the inspection
-sub data {
-    my ($self,$dir,$data) = @_;
+sub in {
+    my App::HTTP_Proxy_IMP::IMP $self = shift;
+    my ($dir,$data,$type) = @_;
     my $anl = $self->{analyzer} or die;
-    return $anl->data($dir,undef) if ! defined $data; # eof
+    return $anl->data($dir,'') if $data eq ''; # eof
 
-    # first call on dir == 0 will be complete request header, e.g.
-    # called from in_request_header
-    $self->{rqhdr_len} ||= length($data) if $dir == 0;
-
-    my $canpass = $self->{canpass}[$dir];
-    my ($fwd,$inspect);
-    if ( $canpass == IMP_MAXOFFSET ) {
-	# forward everything directly
-	$fwd = $data;
-    } elsif ( ! $canpass ) {
-	# send everything to analyzer
-	$self->{buf}[$dir] .= $data;
-	$inspect = $data;
+    # add data to buf
+    my $buf = $self->{buf}[$dir];
+    my $lastbuf = $buf->[-1];
+    if ( ! defined $lastbuf->[2] ) {
+	# dummy buf to preserve position in stream
+	# set data and type
+	$lastbuf->[1] = $data;
+	$lastbuf->[2] = $type;
+    } elsif ( $type == IMP_DATA_STREAM and $lastbuf->[2] == IMP_DATA_STREAM ) {
+	# streaming data: concatinate to existing buf
+	$buf->[-1][1] .= $data;
     } else {
-	# we might forward some part of the incoming data directly
-	my $rpass = $canpass - $self->{pos}[$dir];
+	# non-streaming, add new buf
+	push @$buf, [
+	    $lastbuf->[1] + length($lastbuf->[0]), # begin = end of last buf
+	    $data,
+	    $type
+	];
+    }
 
-	# some sanity checks if we did correct house keeping
-	die "canpass <= buf.pos" if $rpass <= 0;
-	die "expected buf[$dir] to be empty because of canpass" 
-	    if $self->{buf}[$dir] ne '';
+    my @inspect;
 
-	if ( $rpass > length($data) ) {
-	    # forward everything, canpass still points into future
-	    $fwd = $data;
+    # if we got a canpass in the future we can forward some data already
+    # in case we are in prepass mode this will result in some data for
+    # inspection
+    @inspect = _fwdbuf($self,$dir) if $self->{canpass}[$dir];
+
+    # if there is something to inspect, which we did not send to inspection
+    # it has to be from the current call and should relate only to the last
+    # entry in buf
+    # send the trailing data from last buf to inspection, but at most 
+    # length($data) (e.g. what we got in this call)
+    # there should be no overlap with data already in @inspect, because they
+    # got added only if prepass and got then removed from @$buf
+    $lastbuf = $buf->[-1];
+    if ( defined $lastbuf->[2] ) {
+	my $len = length($data);
+	my $blen = length($lastbuf->[1]);
+	if ( $blen <= $len ) {
+	    # full buffer
+	    push @inspect, $lastbuf;
 	} else {
-	    # forward part or all, reset canpass because it was reached
-	    $fwd = substr($data,0,$rpass,'');
-	    $inspect = $self->{buf}[$dir] = $data;
-	    $self->{canpass}[$dir] = 0;
+	    # part of buffer
+	    push @inspect, [
+		$lastbuf->[0] + $blen - $len.
+		substr( $lastbuf->[1],-$len,$len),
+		$type
+	    ];
 	}
     }
 
-    if ( defined $fwd ) {
-	$self->{pos}[$dir] += length($fwd); # update pos
-
-	if ($dir == 0 and $self->{rqhdr_len}>0 ) {
-	    _handle_rqhdr($self,\$fwd,$self->{pos}[$dir],0);
-	    die "should replace only request " if defined $fwd
-	} 
-    }
-
-    if ( defined $fwd ) {
-	$self->{request}->imp_forward($dir,$dir?0:1,$fwd);
-	if ( $self->{prepass}[$dir] ) {
-	    $inspect = defined($inspect) ? "$fwd$inspect":$fwd;
-	} else {
-	    # set passed to pos
-	    $self->{passed}[$dir] = $self->{pos}[$dir];
-	}
-    }
-    if ( defined $inspect ) {
+    if (@inspect) {
 	# add offset for previously passed data if necessary
-	my $passed = $self->{passed}[$dir];
-	$self->{passed}[$dir] = undef if $passed;
-	$self->{analyzer}->data($dir,$inspect, $passed ? ($passed):());
+	my $inspos = $self->{inspos}[$dir];
+	while ( my $insp = shift @inspect) {
+	    $self->{analyzer}->data(
+		$dir,
+		$insp->[1],   # data
+		$inspos > $insp->[0] ? $insp->[0]:0, # offset || no gap
+		$insp->[2],   # type
+	    );
+	    $inspos = $insp->[0] + length($insp->[1]);
+	}
+	$self->{inspos}[$dir] = $inspos;
     }
 }
 
+sub _fwdbuf {
+    my App::HTTP_Proxy_IMP::IMP $self = shift;
+    my ($dir,@modified) = @_;
+    my $buf = $self->{buf}[$dir];
+    my $canpass = $self->{canpass}[$dir];
+
+    my @fwd;
+    debug("dir=$dir canpass=$canpass buf.n=".int(@$buf)." mod.n=".int(@modified));
+    if ( $canpass == IMP_MAXOFFSET ) {
+	# fwd everything, but keep/insert dummy buf
+	debug("forward everything because of IMP_MAXOFFSET dir=$dir");
+	push @fwd,@$buf;
+	if ( ! defined $fwd[-1][2] ) {
+	    # don't fwd dummy buf
+	    debug("don't forward dummy buf");
+	    @$buf = pop(@fwd);
+	} else {
+	    # no dummy buf, create one with position at end of last buf
+	    debug("create new dummy buf");
+	    @$buf = [ $fwd[-1][0] + length($fwd[-1][1]),'',undef ];
+	}
+
+    } elsif ( $canpass ) {
+	my $end = 0;
+	debug("can pass up to $canpass");
+	while ( @$buf and $canpass > $buf->[0][0] ) {
+	    my $buf0 = $buf->[0];
+	    last if ! defined $buf0->[2]; # no content
+	    $end = $buf0->[0] + length($buf0->[1]);
+	    if ( $canpass >= $end ) {
+		# fwd full packet, remove from @$buf
+		push @fwd,$buf0;
+		shift(@$buf);
+	    } elsif ( $buf0->[2] == IMP_DATA_STREAM ) {
+		# streaming - we can split buffer
+		my $fwd = [
+		    $buf0->[0], # keep start pos
+		    # remove leadings bytes from buf0 and fwd them
+		    substr($buf0->[1],0,$canpass-$end,''),
+		    $buf0->[2], # keep type
+		];
+		# adjust position of remaining buf
+		$buf0->[0] += length($fwd->[1]);
+		# fwd part of data ($fwd), keep rest ($buf0) in @$buf
+		push @fwd,$fwd;
+	    } else {
+		# non-streaming but canpass is not at chunk boundary
+		croak("future (pre)pass offsets need to be at chunk boundary for non-streaming data");
+	    }
+	}
+	if ( ! @$buf ) {
+	    # all eaten, insert new dummy to maintain position
+	    @$buf = [ $end,'',undef ];
+	}
+
+	# reset canpass if we reached it
+	$self->{canpass}[$dir] = 0 if $canpass <= $end;
+    }
+
+    # do we need to inspect fwd content because of prepass ?
+    my $inspos = $self->{prepass}[$dir] ? $self->{inspos}[$dir] : undef;
+
+
+    my @inspect;
+    push @fwd,@modified;
+    while ( my $fwd = shift @fwd) {
+	my ($pos,$data,$type,$changed) = @$fwd;
+	if ( $dir == 0 and $type == IMP_DATA_MESSAGE_HDR ) {
+	    $self->{request}->imp_rqhdr($data,$changed);
+	} else {
+	    $self->{request}->imp_forward($dir,$dir?0:1,$data);
+	}
+	if ( defined $inspos ) {
+	    my $end = $pos + length($data);
+	    if ( $inspos < $end ) {
+		# not yet forwarded to inspection
+		# buffers should already be created so that inspos,canpass..
+		# are at chunk boundaries
+		my $start = $pos - $inspos;
+		die "pos($pos)-inspos($inspos) != 0" if $start != 0;
+		push @inspect,$fwd;
+		$inspos = $end;
+	    }
+	}
+    }
+    return @inspect
+}
+
 sub _imp_callback {
-    my ($self,@rv) = @_;
+    my App::HTTP_Proxy_IMP::IMP $self = shift;
     my $req = $self->{request};
 
-    for my $rv (@rv) {
+    for my $rv (@_) {
 	my $typ = shift(@$rv);
 	my ($fwd,$changed);
 	if ( $typ == IMP_ACCTFIELD ) {
@@ -203,86 +347,77 @@ sub _imp_callback {
 		# nothing can override an earlier pass
 		# except we can upgrade a prepass to pass
 		$self->{prepass}[$dir] = 0 if $typ == IMP_PASS;
-
-	    } elsif ( $offset == IMP_MAXOFFSET or
-		$offset > $self->{pos}[$dir] + length($self->{buf}[$dir]) ) {
-		$req->xdebug("$typ($dir,Future($offset))");
+	    } else {
+		$req->xdebug("$typ($dir,$offset)");
 		$self->{canpass}[$dir] = $offset;
 		$self->{prepass}[$dir] = ($typ == IMP_PREPASS);
-		if ( $self->{buf}[$dir] ne '' ) {
-		    $self->{pos}[$dir] += length($self->{buf}[$dir]);
-		    $fwd = [$dir,$self->{buf}[$dir],$self->{pos}[$dir]];
-		    $self->{buf}[$dir] = '';
-		}
-	    } elsif ( $offset <= $self->{pos}[$dir] ) {
-		# info about data we already passed
-		$req->xdebug("$typ($dir,Obsolete($offset)) - ignoring");
-	    } else {
-		# offset pointing inside the current buffered data
-		# part or all of these data can now be forwarded
-		my $len = $offset - $self->{pos}[$dir];
-		$req->xdebug("$typ($dir,Inbuf($offset)): fwd=$len");
-		$self->{canpass}[$dir] = 0;
-		$self->{pos}[$dir] += $len;
-		$fwd = [$dir,substr($self->{buf}[$dir],0,$len,''),$self->{pos}[$dir]];
+		_fwdbuf($self,$dir);  # forward buffered data up to canpass
 	    }
 
 	} elsif ( $typ == IMP_REPLACE ) {
 	    my ($dir,$offset,$newdata) = @$rv;
+	    $req->xdebug("$typ($dir,$offset, repl.bytes=".length($newdata).")");
 
 	    # remove the data from buf which should be replaced
 	    # replacing future data is not supported, replacing already handled
 	    # data obviously not too
+	    my $buf = $self->{buf}[$dir];
+	    my $buf0 = $buf->[0];
 	    die "cannot replace already handled data: $typ($dir) ".
-		"offset($offset)<=pos($self->{pos}[$dir])"
-		if $offset <= $self->{pos}[$dir];
-	    my $keep = $self->{pos}[$dir] + length($self->{buf}[$dir]) - $offset;
-	    die "cannot replace future data: $typ($dir) offset($offset) -> keep($keep)"
-		if $keep < 0;
+		"offset($offset)<=buf[0].pos($buf0->[0])"
+		if $offset <= $buf0->[0];
 
-	    # remove data from buf
-	    $req->xdebug("$typ($dir,Inbuf($offset)) keep=$keep replace=".length($newdata));
-	    $self->{buf}[$dir] = $keep ? substr($self->{buf}[$dir],-$keep,$keep) : '';
-	    $self->{pos}[$dir] = $offset;
+	    # the data to replace should be all in the first buffer
+	    my $len0 = length($buf0->[1]);
+	    my $replace = $offset - $buf0->[0];
+	    die "cannot cross buffer boundaries when replacing data: ".
+		"$typ($dir) len=$len0 replace=$replace"
+		if $len0 < $replace;
 
-	    # and forward new data instead
-	    $changed = 1;
-	    $fwd = [$dir,$newdata,$offset] if $newdata ne '';
+	    # if the buffer is non-stream, the offset should be at buffer boundary
+	    my $fwd;
+	    if ( $replace < $len0 ) {
+		die "cannot replace parts of non-stream buffers" 
+		    if $buf0->[2] != IMP_DATA_STREAM;
+
+		# create buffer to forward with new data
+		$fwd = [
+		    $buf0->[0],   # old pos
+		    $newdata,     # new data
+		    $buf0->[1],   # old type
+		    1,            # changed
+		];
+
+		# remove replaced data and adjust pos
+		substr($buf0->[1],0,$replace,'');
+		$buf0->[0] += $replace;
+
+	    } else {
+		# replace complete buf
+		$fwd = $buf0;
+		$fwd->[3] = 1; # set as changed
+
+		# remove buf
+		shift(@$buf);
+		if ( ! @$buf ) {
+		    # add dummy
+		    push @$buf, [
+			$buf0->[0] + length($buf0->[1]),
+			'',
+			undef
+		    ];
+		}
+	    }
+
+	    # propagate change
+	    _fwdbuf($self,$dir,$fwd);
 
 	} elsif ( $typ == IMP_TOSENDER ) {
 	    my ($dir,$data) = @$rv;
 	    $req->xdebug("$typ($dir) data=".length($data));
 	    $req->imp_forward($dir,$dir,$data); # from == to
 	}
-
-	if ($fwd) {
-	    my ($dir,$buf,$offset) = @$fwd;
-	    if ($dir == 0 and $self->{rqhdr_len}>0 ) {
-		_handle_rqhdr($self,\$buf,$offset,$changed);
-		die "should replace only request " if defined $buf
-	    } 
-	    $req->imp_forward($dir,$dir?0:1,$buf) if defined $buf;
-	}
     }
-}
-
-sub _handle_rqhdr {
-    my ($self,$rfwd,$offset,$changed) = @_;
-    $self->{rqhdr_buf} .= $$rfwd;
-    $self->{rqhdr_chg} ||= $changed;
-    my $fwd_over = $offset - $self->{rqhdr_len};
-
-    if ( $fwd_over < 0 ) {
-	# still header data missing
-	$$rfwd = undef; # nothing to forward
-	return;
-    }
-    $self->{rqhdr_len} = -1; # got at least header
-    $$rfwd = $fwd_over>0 
-	? substr($self->{rqhdr_buf},-$fwd_over,$fwd_over,'')  # got header and more
-	: undef;                                              # got header only
-
-    $self->{request}->imp_rqhdr($self->{rqhdr_buf},$self->{rqhdr_chg});
 }
 
 1;

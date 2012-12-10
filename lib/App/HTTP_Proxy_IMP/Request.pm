@@ -10,12 +10,14 @@ package App::HTTP_Proxy_IMP::Request;
 use base 'Net::Inspect::L7::HTTP::Request::InspectChain';
 use fields (
     'connected',  # is upstream already connected?
-    'chunked',    # set if we do chunked output
+    'chunked',    # chunking status if we do chunked output (undef: not started)
+    'resp_te',    # transfer encoding used to output response body: [C]hunked, 
+                  # [E]of, [K]eep existing
     'acct',       # some accounting data
-    'imp_filter',
+    'imp_filter', # App::HTTP_Proxy_IMP::IMP object
 );
+use App::HTTP_Proxy_IMP::IMP qw(:dtypes);
 use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG);
-
 
 sub new_request {
     my ($self,$meta,$conn) = @_;
@@ -25,12 +27,6 @@ sub new_request {
 	$obj->{imp_filter} = $factory->new_analyzer( $obj,$meta);
     }
     return $obj;
-}
-
-sub DESTROY {
-    my $self = shift;
-    my $relay = $self->{conn}{relay} or return;
-    $relay->account(%{ $self->{meta}}, %{ $self->{acct}});
 }
 
 sub in_request_header {
@@ -58,39 +54,72 @@ sub in_request_header {
 	request_header => sub {
 	    my ($self,$data,$time) = @_;
 	    if ( my $filter = $self->{imp_filter} ) {
-		$filter->data(0,$$data);
+		$filter->in(0,$$data,IMP_DATA_MESSAGE_HDR);
 	    } else {
 		goto &_inrqhdr_connect_upstream,
 	    }
 	},
 	request_body => sub {
 	    my ($self,$data,$eof,$time) = @_;
-	    _send_and_remove($self,1,$data,$time) if $$data ne '';
+	    _send_and_remove($self,1,$data,IMP_DATA_STREAM) if $$data ne '';
 	    return '';
 	},
 	response_header => sub {
 	    my ($self,$hdr,$time) = @_;
 	    $self->{acct}{code} = $1 if $$hdr =~m{\AHTTP/1\.\d\s+(\d+)};
-	    _send($self,0,$$hdr,$time);
-	    return 0;
+
+	    # if we might change data remove content-length
+	    # and transfer content chunked if HTTP/1.1
+	    my $filter = $self->{imp_filter};
+	    my $hdr_changed =0;
+
+	    if ( $filter && $filter->can_modify_response ) {
+		$hdr_changed = 1 if $$hdr =~s{^Content-length:.*(\n[ \t].*)*\n}{}img;
+		if ( $$hdr =~m{\A.* HTTP/1\.1\r?\n} ) {
+		    $hdr_changed = 1;
+		    $$hdr =~s{^Transfer-Encoding:.*(\n[ \t].*)*\n}{}img;
+		    $$hdr =~s{\n}{\nTransfer-Encoding: chunked\r\n};
+		    $self->{resp_te} = 'C';
+		} else {
+		    $self->{resp_te} = 'E';
+		}
+	    } else {
+		$self->{resp_te} = 'K'
+	    } 
+
+	    _send($self,0,$$hdr,IMP_DATA_MESSAGE_HDR);
+	    return $hdr_changed;
 	},
 	response_body => sub {
 	    my ($self,$data,$eof,$time) = @_;
 	    $self->xdebug("response_body len=".length($$data));
-	    _send_and_remove($self,0,$data,$time) if $$data ne '';
+	    if ( $self->{resp_te} eq 'C' ) {
+		# add chunk header
+		if ( $$data ne '' ) {
+		    $$data = sprintf("%s%x\r\n%s",
+			$self->{chunked}++ ? "\r\n":"",  # CRLF after chunk
+			length($data),                   # length as hex
+			$$data
+		    );
+		}
+		$$data .= "0\r\n\r\n" if $eof;
+	    }
+	    _send_and_remove($self,0,$data,IMP_DATA_STREAM) if $$data ne '';
 	    return '';
 	},
 	chunk_header => sub {
 	    my ($self,$hdr,$time) = @_;
 	    return if $$hdr eq '';
 	    # add chunk-end CRLF unless it is the first chunk header
-	    _send($self,0, $self->{chunked}++ ? "\r\n$$hdr" : $$hdr );
+	    _send($self,0, 
+		$self->{chunked}++ ? "\r\n$$hdr" : $$hdr,
+		IMP_DATA_CHUNK_HDR );
 	    return 1;
 	},
 	chunk_trailer => sub {
 	    my ($self,$trailer,$time) = @_;
 	    return if $$trailer eq '';
-	    _send($self,0,$$trailer,$time);
+	    _send($self,0,$$trailer,IMP_DATA_CHUNK_TRAILER);
 	    return 1;
 	},
     });
@@ -116,12 +145,13 @@ sub in_request_body {
     return $self->SUPER::in_request_body(@_);
 }
 
+
 sub in_data {
     my ($self,$from,$data,$eof,$time) = @_;
     # forward data to other side
     my $to = $from?0:1;
     $self->xdebug("%s bytes from %s to %s",length($data),$from,$to);
-    _send($self,$to,$data) if $data ne '';
+    _send($self,$to,$data,IMP_DATA_STREAM) if $data ne '';
     if ($eof) {
 	$self->{conn}{relay}->shutdown($from,0);
 	# the first shutdown might cause the relay to close
@@ -132,9 +162,12 @@ sub in_data {
 
 sub fatal {
     my ($self,$reason) = @_;
-    my $conn = $self->{conn};
     warn "[fatal] ".$self->id." $reason\n";
-    $self->{conn}{relay}->close if $self->{conn};
+    if ( my $conn = $self->{conn} ) {
+	my $relay =  $conn->{relay};
+	$relay->account(%{ $self->{meta}}, %{ $self->{acct}});
+	$relay->close;
+    }
 }
 
 sub in_response_body {
@@ -142,17 +175,14 @@ sub in_response_body {
     $self->xdebug("in_response_body len=".length($data));
     my $rv = $self->SUPER::in_response_body($data,$eof,$time);
     if ( $eof ) {
-	$self->xdebug("got eof in response");
-	my $rphdr = $self->response_header;
-	if ( ! defined $rphdr->content_length and
-	    ($rphdr->header('Transfer-Encoding')||'') !~m{\bchunked\b} ) {
-	    # no content-length given and not chunked
-	    # request need to be closed with eof
+	$self->xdebug("end of response");
+	$self->{conn}{relay}->account(%{ $self->{meta}}, %{ $self->{acct}});
+	# any more spooled requests (pipelining)?
+	if ( $self->{resp_te} eq 'E' ) {
+	    # eof to signal end of request
 	    $self->{conn}{relay}->close;
 	    return $rv;
 	}
-
-	# any more spooled requests (pipelining)?
 	_call_spooled($self);
     }
     return $rv
@@ -190,6 +220,9 @@ sub _inrqhdr_connect_upstream {
 
 	# rewrite method://host/page to /page
 	$hdr_changed = 1 if $$hdr =~s{\A(\w+[ \t]+)(\w+://[^/]+)}{$1};
+
+	# remove Proxy-Connection header
+	$hdr_changed = 1 if $$hdr =~s{^Proxy-Connection:.*(\n[ \t].*)*\n}{}img;
     }
 
     $self->xdebug("new request $method $proto://$host:$port$page");
@@ -237,18 +270,18 @@ sub _call_spooled {
 
 
 sub _send {
-    my ($self,$to,$data) = @_;
+    my ($self,$to,$data,$type) = @_;
     my $from = $to ? 0:1;
     if ( my $filter = $self->{imp_filter} ) {
-	$filter->data($from,$data);
+	$filter->in($from,$data,$type);
     } else {
 	_forward($self,$from,$to,$data);
     }
 }
 
 sub _send_and_remove {
-    my ($self,$to,$dataref) = @_;
-    _send($self,$to,$$dataref);
+    my ($self,$to,$dataref,$type) = @_;
+    _send($self,$to,$$dataref,$type);
     $$dataref = '';
 }
 

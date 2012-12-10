@@ -14,12 +14,24 @@ use fields (
 
 use Net::IMP qw(:DEFAULT :log);
 use Net::IMP::Debug;
+use App::HTTP_Proxy_IMP::IMP ':dtypes';
 
 sub USED_RTYPES { return (
     IMP_REPLACE, # remove Cookie/Authorization header
     IMP_LOG,     # log if we removed something
     IMP_DENY,    # bad requests/responses
     IMP_PASS,
+)}
+
+sub supported_dtypes { return (
+    # claim to support all types needed for HTTP
+    # we only need to make sure, that we keep type boundaries when modifying
+    # e.g. don't make header + body data out of header etc or issue replace
+    # for part of header only
+    IMP_DATA_MESSAGE_HDR,
+    IMP_DATA_CHUNK_HDR,
+    IMP_DATA_CHUNK_TRAILER,
+    IMP_DATA_STREAM,
 )}
 
 sub new_analyzer {

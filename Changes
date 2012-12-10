@@ -1,3 +1,8 @@
+0.5 2012-12-10
+- add special IMP types for HTTP
+  - use typed buffers instead of stream handling internally
+  - adapt CSRFprotect to use these
+- various bug fixes
 0.4 2012-11-28
 - require 5.12.4, 5.10.1 has Socket module w/o inet_ntop etc and because
   5.10 is end of live there is no motivation to work around it
