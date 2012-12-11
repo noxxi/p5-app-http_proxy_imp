@@ -84,7 +84,10 @@ sub in_request_header {
 		    $self->{resp_te} = 'E';
 		}
 	    } else {
-		$self->{resp_te} = 'K'
+		$self->{resp_te} = 
+		    $$hdr =~m{^Transfer-Encoding:\s*chunked}mi ? 'C' :
+		    $$hdr =~m{^Content-length:}mi ? 'K' :
+		    'E';
 	    } 
 
 	    _send($self,0,$$hdr,IMP_DATA_MESSAGE_HDR);
@@ -175,7 +178,7 @@ sub in_response_body {
     $self->xdebug("in_response_body len=".length($data));
     my $rv = $self->SUPER::in_response_body($data,$eof,$time);
     if ( $eof ) {
-	$self->xdebug("end of response");
+	$self->xdebug("end of response, te=$self->{resp_te}");
 	$self->{conn}{relay}->account(%{ $self->{meta}}, %{ $self->{acct}});
 	# any more spooled requests (pipelining)?
 	if ( $self->{resp_te} eq 'E' ) {

@@ -30,6 +30,13 @@ sub USED_RTYPES {
     );
 }
 
+# we don't change anything, so all types are supported
+# but we don't depend on HTTP IMP types, streaming is enough
+sub supported_dtypes {
+    my ($self,$dtypes) = @_;
+    return @$dtypes;
+}
+
 sub new_analyzer {
     my ($class,%args) = @_;
     my $self = $class->SUPER::new_analyzer(%args);

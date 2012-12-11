@@ -21,7 +21,8 @@ our @EXPORT_OK = qw($DEBUG_RX);
 # local output 
 sub _out {
     my ($prefix,$msg) = @_;
-    $msg =~s{\n}{ | }g;  # prefix continuation lines
+    $msg =~s{\n}{\n | }g;  # prefix continuation lines
+    $msg =~s{(\\|[^[:print:][:space:]])}{ sprintf("\\%03o",ord($1)) }esg;
     printf STDERR "%.2f %s %s\n", 0+gettimeofday(), $prefix,$msg;
 }
 

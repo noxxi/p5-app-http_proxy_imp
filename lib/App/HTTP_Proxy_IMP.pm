@@ -15,7 +15,7 @@ use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG $DEBUG_RX);
 use Net::Inspect::Debug qw(%TRACE);
 use Carp 'croak';
 
-our $VERSION = 0.5;
+our $VERSION = 0.6;
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -96,7 +96,7 @@ sub start {
 	my $srv = $sockclass->new(
 	    LocalAddr => $addr,
 	    Listen    => 10,
-	    Reuse     => 1,
+	    ReuseAddr => 1,
 	) or croak("cannot listen to $addr: $!");
 	push @listen, AnyEvent->io(
 	    fh => $srv,

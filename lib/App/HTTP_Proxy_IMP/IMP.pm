@@ -61,7 +61,10 @@ my @dtypes = (
 
 sub can_modify_response {
     my $self = shift;
-    return grep { $_ ~~ [ IMP_REPLACE, IMP_TOSENDER ] } $self->{analyzer}->USED_RTYPES;
+    for ( $self->{analyzer}->USED_RTYPES ) {
+	return 1 if $_ == IMP_REPLACE || $_ == IMP_TOSENDER;
+    }
+    return;
 }
 
 # create a new factory object
