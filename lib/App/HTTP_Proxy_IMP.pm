@@ -350,3 +350,11 @@ Toggles debugging (e.g. enable|disable).
 =head1 AUTHOR
 
 Steffen Ullrich <sullr@cpan.org>
+
+=head1 COPYRIGHT
+
+Copyright 2012,2013 Steffen Ullrich.
+
+This module is free software; you can redistribute it and/or
+modify it under the same terms as Perl itself.
+

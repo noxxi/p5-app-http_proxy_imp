@@ -43,11 +43,6 @@ sub new_analyzer {
     return $self;
 }
 
-# these should not be reached
-sub response_hdr {};
-sub response_body {};
-sub any_data {}
-
 
 sub request_hdr {
     my ($self,$hdr) = @_;
@@ -152,6 +147,10 @@ sub request_body {
     }
 }
 
+# these should not be reached
+sub response_hdr {}
+sub response_body {}
+sub any_data {}
 
 sub _log_formdata {
     my $self = shift;

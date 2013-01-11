@@ -77,7 +77,7 @@ sub in_request_header {
 	    my $filter = $self->{imp_filter};
 	    my $hdr_changed =0;
 
-	    if ( $filter && $filter->can_modify_response ) {
+	    if ( $filter && $filter->can_modify ) {
 		$hdr_changed = 1 if $$hdr =~s{^Content-length:.*(\n[ \t].*)*\n}{}img;
 		if ( $$hdr =~m{\A.* HTTP/1\.1\r?\n} ) {
 		    $hdr_changed = 1;
