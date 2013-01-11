@@ -16,7 +16,7 @@ use fields (
     'acct',       # some accounting data
     'imp_filter', # App::HTTP_Proxy_IMP::IMP object
 );
-use App::HTTP_Proxy_IMP::IMP qw(:dtypes);
+use Net::IMP::HTTP; # constants
 use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG);
 
 sub new_request {
@@ -49,19 +49,23 @@ sub in_request_header {
 
     $self->{acct}{start} = $time;
 
+    # FIXME add decompression only if we really need to inspect content
+    $self->add_hooks('unchunk','uncompress_ce','uncompress_te');
+
     $self->add_hooks({
 	name => 'fwd-data',
 	request_header => sub {
 	    my ($self,$data,$time) = @_;
 	    if ( my $filter = $self->{imp_filter} ) {
-		$filter->in(0,$$data,IMP_DATA_MESSAGE_HDR);
+		$filter->in(0,$$data,IMP_DATA_HTTPRQ_HEADER);
 	    } else {
 		goto &_inrqhdr_connect_upstream,
 	    }
 	},
 	request_body => sub {
 	    my ($self,$data,$eof,$time) = @_;
-	    _send_and_remove($self,1,$data,IMP_DATA_STREAM) if $$data ne '';
+	    _send_and_remove($self,1,$data,IMP_DATA_HTTPRQ_CONTENT) 
+		if $$data ne '';
 	    return '';
 	},
 	response_header => sub {
@@ -90,7 +94,7 @@ sub in_request_header {
 		    'E';
 	    } 
 
-	    _send($self,0,$$hdr,IMP_DATA_MESSAGE_HDR);
+	    _send($self,0,$$hdr,IMP_DATA_HTTPRQ_HEADER);
 	    return $hdr_changed;
 	},
 	response_body => sub {
@@ -107,23 +111,9 @@ sub in_request_header {
 		}
 		$$data .= "0\r\n\r\n" if $eof;
 	    }
-	    _send_and_remove($self,0,$data,IMP_DATA_STREAM) if $$data ne '';
+	    _send_and_remove($self,0,$data,IMP_DATA_HTTPRQ_CONTENT)
+		if $$data ne '';
 	    return '';
-	},
-	chunk_header => sub {
-	    my ($self,$hdr,$time) = @_;
-	    return if $$hdr eq '';
-	    # add chunk-end CRLF unless it is the first chunk header
-	    _send($self,0, 
-		$self->{chunked}++ ? "\r\n$$hdr" : $$hdr,
-		IMP_DATA_CHUNK_HDR );
-	    return 1;
-	},
-	chunk_trailer => sub {
-	    my ($self,$trailer,$time) = @_;
-	    return if $$trailer eq '';
-	    _send($self,0,$$trailer,IMP_DATA_CHUNK_TRAILER);
-	    return 1;
 	},
     });
 
@@ -154,7 +144,7 @@ sub in_data {
     # forward data to other side
     my $to = $from?0:1;
     $self->xdebug("%s bytes from %s to %s",length($data),$from,$to);
-    _send($self,$to,$data,IMP_DATA_STREAM) if $data ne '';
+    _send($self,$to,$data,IMP_DATA_HTTPRQ_DATA) if $data ne '';
     if ($eof) {
 	$self->{conn}{relay}->shutdown($from,0);
 	# the first shutdown might cause the relay to close

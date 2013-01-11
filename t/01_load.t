@@ -3,14 +3,24 @@
 use strict;
 use warnings;
 
-use Test::More tests => 3;
+use Test::More tests => 4;
 
 eval 'use App::HTTP_Proxy_IMP';
 cmp_ok( $@,'eq','', 'loading App::HTTP_Proxy_IMP' );
 
 # check, that the plugins we ship can be loaded
-# CSRFprotect needs additional modules, so don't test it here
-for my $mod (qw( LogFormData Example::changeTarget)) {
+check_load('LogFormData');
+check_load('Example::changeTarget');
+
+# CSRFprotect needs additional modules, so first try to load it
+SKIP: {
+    skip "prerequisites missing for App::HTTP_Proxy_IMP::IMP::CSRFprotect",1
+	if ! eval { require App::HTTP_Proxy_IMP::IMP::CSRFprotect };
+    check_load('CSRFprotect');
+}
+
+sub check_load {
+    my $mod = shift;
     eval {
 	my $app = App::HTTP_Proxy_IMP->start({
 	    impns => ['App::HTTP_Proxy_IMP::IMP'],

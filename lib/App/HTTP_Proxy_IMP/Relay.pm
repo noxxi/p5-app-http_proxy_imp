@@ -4,7 +4,7 @@ use warnings;
 package App::HTTP_Proxy_IMP::Relay;
 use fields (
     'fds',      # file descriptors
-    'conn',     # App::HTTP_Proxy_IMP::HRTTPConn object
+    'conn',     # App::HTTP_Proxy_IMP::HTTPConn object
 );
 
 use App::HTTP_Proxy_IMP::Debug;

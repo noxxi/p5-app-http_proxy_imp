@@ -4,8 +4,8 @@ use warnings;
 package App::HTTP_Proxy_IMP::IMP;
 use fields (
     'factory',   # factory from new_factory
-    'api_http',  # use IMP_DATA_HTTP* instead of IMP_DATA_STREAM only
     'analyzer',  # analyzer from new_analyzer
+    'can_modify',# true if analyzer supports IMP_REPLACE or IMP_TOSENDER 
     'request',   # privHTTPrequest object (weak ref)
     # data, which might be modified be current inspection, need to be buffered
     # until we get the final decision
@@ -19,52 +19,26 @@ use fields (
 use Net::Inspect::Debug qw(:DEFAULT $DEBUG);
 use Net::IMP::Debug var => \$DEBUG, sub => \&debug;
 use Net::IMP;
+use Net::IMP::HTTP;
 use Scalar::Util qw(weaken dualvar);
 use Carp;
 
-{
-    use Exporter 'import';
-    our %EXPORT_TAGS = ( dtypes => [
-	'IMP_DATA_MESSAGE_HDR',
-	'IMP_DATA_CHUNK_HDR',
-	'IMP_DATA_CHUNK_TRAILER',
-	'IMP_DATA_STREAM', # reexport for convinience
-    ]);
-    Exporter::export_ok_tags('dtypes');
-}
+# we want plugins to suppport the HTTP Request innterface
+my $interface = [
+    IMP_DATA_HTTPRQ,
+    [ 
+	IMP_PASS,
+	IMP_PREPASS,
+	IMP_REPLACE,
+	IMP_TOSENDER,
+	IMP_DENY,
+	IMP_LOG,
+	IMP_ACCTFIELD,
+    ]
+];
 
-use constant {
-    IMP_DATA_MESSAGE_HDR   => dualvar(0x10,'http.message.hdr'),
-    IMP_DATA_CHUNK_HDR     => dualvar(0x11,'http.chunk.hdr'),
-    IMP_DATA_CHUNK_TRAILER => dualvar(0x12,'http.chunk.trailer'),
-};
-
-my @rtypes = (
-    IMP_PASS,
-    IMP_PREPASS,
-    IMP_REPLACE,
-    IMP_TOSENDER,
-    IMP_DENY,
-    IMP_LOG,
-    IMP_ACCTFIELD,
-);
-
-my @dtypes = (
-    # we want to use a http interface
-    IMP_DATA_MESSAGE_HDR,
-    IMP_DATA_CHUNK_HDR,
-    IMP_DATA_CHUNK_TRAILER,
-    # request/response body data are stream data
-    IMP_DATA_STREAM,
-);
-@dtypes = sort @dtypes;
-
-sub can_modify_response {
-    my $self = shift;
-    for ( $self->{analyzer}->USED_RTYPES ) {
-	return 1 if $_ == IMP_REPLACE || $_ == IMP_TOSENDER;
-    }
-    return;
+sub can_modify {
+    return shift->{can_modify};
 }
 
 # create a new factory object
@@ -83,11 +57,10 @@ sub new_factory {
 	    or die "invalid module $module";
 	eval "require $mod" or die "cannot load $mod args=$args: $@";
 	my %args = $mod->str2cfg($args//'');
-	my $factory = $mod->new_factory(
-	    rtypes => \@rtypes,
-	    dtypes => [ @dtypes ],
-	    %args
-	) or croak("cannot create Net::IMP factory for $mod");
+	my $factory = $mod->new_factory(%args) 
+	    or croak("cannot create Net::IMP factory for $mod");
+	$factory = $factory->set_interface( $interface )
+	    or croak("$mod does not implement the interface supported by us");
 	push @factory,$factory;
     }
 
@@ -101,22 +74,17 @@ sub new_factory {
     }
 
     my App::HTTP_Proxy_IMP::IMP $self = fields::new($class);
-    $self->{factory} = $factory[0];
+    $self->{factory} = $factory[0]->set_interface( $interface ) or 
+	croak("factory[0] does not implement the interface supported by us");
 
-    my @dt = sort $self->{factory}->supported_dtypes(\@dtypes);
-    if ( ! @dt ) {
-	croak("no common supported data types between ".
-	    __PACKAGE__." and plugins");
-    } elsif ( "@dt" eq "@dtypes" ) {
-	# can work with HTTP request types
-	debug("full HTTP request interface supported");
-	$self->{api_http} = 1;
-    } elsif ( @dt != 1 or $dt[0] != IMP_DATA_STREAM ) {
-	croak("strange configuration in plugins, supported types = @dt");
-    } else {
-	# only stream interface is supported
-	debug("only stream interface supported");
-	$self->{api_http} = 0;
+    $self->{can_modify} = 0;
+    CHKIF: for my $if ( $self->{factory}->get_interface ) {
+	my ($dt,$rt) = @$if;
+	for (@$rt) {
+	    $_ ~~ [ IMP_REPLACE, IMP_TOSENDER ] or next;
+	    $self->{can_modify} =1;
+	    last CHKIF;
+	}
     }
 	
     return $self;
@@ -137,13 +105,13 @@ sub new_analyzer {
 
     my App::HTTP_Proxy_IMP::IMP $self = fields::new(ref($factory));
     %$self = (
-	request   => $request,
-	api_http  => $factory->{api_http},
-	analyzer  => $anl,
-	buf       => [[ [0,'',undef] ],[ [0,'',undef] ]],
-	inspos    => [0,0],
-	canpass   => [0,0],
-	prepass   => [0,0],
+	request    => $request,
+	analyzer   => $anl,
+	can_modify => $factory->{can_modify},
+	buf        => [[ [0,'',undef] ],[ [0,'',undef] ]],
+	inspos     => [0,0],
+	canpass    => [0,0],
+	prepass    => [0,0],
     );
     weaken($self->{request});
     weaken( my $wself = $self );
@@ -170,7 +138,7 @@ sub in {
 	# set data and type
 	$lastbuf->[1] = $data;
 	$lastbuf->[2] = $type;
-    } elsif ( $type == IMP_DATA_STREAM and $lastbuf->[2] == IMP_DATA_STREAM ) {
+    } elsif ( $type < 0 and $type == $lastbuf->[2] ) {
 	# streaming data: concatinate to existing buf
 	$buf->[-1][1] .= $data;
     } else {
@@ -262,7 +230,7 @@ sub _fwdbuf {
 		# fwd full packet, remove from @$buf
 		push @fwd,$buf0;
 		shift(@$buf);
-	    } elsif ( $buf0->[2] == IMP_DATA_STREAM ) {
+	    } elsif ( $buf0->[2] < 0 ) {
 		# streaming - we can split buffer
 		my $fwd = [
 		    $buf0->[0], # keep start pos
@@ -296,7 +264,7 @@ sub _fwdbuf {
     push @fwd,@modified;
     while ( my $fwd = shift @fwd) {
 	my ($pos,$data,$type,$changed) = @$fwd;
-	if ( $dir == 0 and $type == IMP_DATA_MESSAGE_HDR ) {
+	if ( $dir == 0 and $type == IMP_DATA_HTTPRQ_HEADER ) {
 	    $self->{request}->imp_rqhdr($data,$changed);
 	} else {
 	    $self->{request}->imp_forward($dir,$dir?0:1,$data);
@@ -381,7 +349,7 @@ sub _imp_callback {
 	    my $fwd;
 	    if ( $replace < $len0 ) {
 		die "cannot replace parts of non-stream buffers" 
-		    if $buf0->[2] != IMP_DATA_STREAM;
+		    unless $buf0->[2] < 0;
 
 		# create buffer to forward with new data
 		$fwd = [

@@ -4,7 +4,7 @@
 use strict;
 use warnings;
 package App::HTTP_Proxy_IMP::IMP::LogFormData;
-use base 'Net::IMP::Base';
+use base 'Net::IMP::HTTP::Request';
 use fields (
     'rqbuf',  # buffered data from request
     'req',    # HTTP::Request object for request header
@@ -17,7 +17,7 @@ use Net::IMP qw(:DEFAULT :log); # constants
 require HTTP::Request;
 use Net::IMP::Debug;
 
-sub USED_RTYPES {
+sub RTYPES {
     # we don't change anything but need to analyze, so we can PREPASS
     # everything initially until Inf and later upgrade it to PASS
     # because we are only interested in request header and body, data 
@@ -28,13 +28,6 @@ sub USED_RTYPES {
 	IMP_DENY,    # on parsing errors
 	IMP_LOG,     # somewhere to log the info about form data
     );
-}
-
-# we don't change anything, so all types are supported
-# but we don't depend on HTTP IMP types, streaming is enough
-sub supported_dtypes {
-    my ($self,$dtypes) = @_;
-    return @$dtypes;
 }
 
 sub new_analyzer {
@@ -50,48 +43,49 @@ sub new_analyzer {
     return $self;
 }
 
-sub data {
-    my ($self,$dir,$data) = @_;
-    return if $dir == 1; # response - we should not get these except for eof
-    $self->{rqbuf} .= $data;
-    if ( ! $self->{req} ) {
-	if ( $self->{rqbuf} =~m{(\r?)\n\1\n}g ) {
-	    #debug("got request");
-	    # end of header
-	    my $req = substr($self->{rqbuf},0,pos($self->{rqbuf}),'');
-	    $req = $self->{req} = HTTP::Request->parse($req) or do {
-		# failed to parse
-		$self->run_callback(
-		    [ IMP_DENY,0,"failed to parse request header" ]);
-		return;
-	    };
-	    if ( my @qp = $req->uri->query_form ) {
-		#debug("got query_string @qp");
-		my @param;
-		for(my $i=0;$i<@qp;$i+=2 ) {
-		    push @param,[ $qp[$i], $qp[$i+1] ];
-		}
-		$self->{info}{'header.query_string'} = \@param
-	    }
-	    my $ct = $req->content_type;
-	    if ( $ct && $req->method eq 'POST' and 
-		$ct ~~ ['application/x-www-form-urlencoded','multipart/form-data']
-		){
-		#debug("got content-type $ct");
-		$self->{btype} = $ct;
-	    } else {
-		# no need to analyze further
-		#debug("no or no interesting body");
-		$self->_log_formdata() if $self->{info};
-		$self->{rqbuf} = ''; # throw away
-		$self->run_callback( [ IMP_PASS,0,IMP_MAXOFFSET ]);
-		return;
-	    }
-	} else {
-	    # eof in request header or need more data
-	    return;
+# these should not be reached
+sub response_hdr {};
+sub response_body {};
+sub any_data {}
+
+
+sub request_hdr {
+    my ($self,$hdr) = @_;
+    my $req = $self->{req} = HTTP::Request->parse($hdr) or do {
+	# failed to parse
+	$self->run_callback(
+	    [ IMP_DENY,0,"failed to parse request header" ]);
+	return;
+    };
+
+    if ( my @qp = $req->uri->query_form ) {
+	#debug("got query_string @qp");
+	my @param;
+	for(my $i=0;$i<@qp;$i+=2 ) {
+	    push @param,[ $qp[$i], $qp[$i+1] ];
 	}
+	$self->{info}{'header.query_string'} = \@param
     }
+
+    my $ct = $req->content_type;
+    if ( $ct && $req->method eq 'POST' and 
+	$ct ~~ ['application/x-www-form-urlencoded','multipart/form-data']
+	){
+	#debug("got content-type $ct");
+	$self->{btype} = $ct;
+    } else {
+	# no need to analyze further
+	#debug("no or no interesting body");
+	$self->_log_formdata() if $self->{info};
+	$self->{rqbuf} = ''; # throw away
+	$self->run_callback( [ IMP_PASS,0,IMP_MAXOFFSET ]);
+    }
+}
+
+sub request_body {
+    my ($self,$data,$offset) = @_;
+    $offset or die "gaps should not happen";
+    $self->{rqbuf} .= $data;
 
     if ( $data//'' eq '' ) {
 	# eof

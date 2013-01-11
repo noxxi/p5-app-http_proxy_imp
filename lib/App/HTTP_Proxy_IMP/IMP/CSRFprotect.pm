@@ -4,34 +4,21 @@
 use strict;
 use warnings;
 package App::HTTP_Proxy_IMP::IMP::CSRFprotect;
-use base 'Net::IMP::Base';
+use base 'Net::IMP::HTTP::Request';
 use fields (
-    'rqhdr_done',   # request header
-    'rphdr_done',   # response header
     'target',       # target domain from request header
     'origin',       # domain from origin/referer request header
 );
 
 use Net::IMP qw(:DEFAULT :log);
 use Net::IMP::Debug;
-use App::HTTP_Proxy_IMP::IMP ':dtypes';
+use Net::IMP::HTTP;
 
-sub USED_RTYPES { return (
+sub RTYPES { return (
     IMP_REPLACE, # remove Cookie/Authorization header
     IMP_LOG,     # log if we removed something
     IMP_DENY,    # bad requests/responses
     IMP_PASS,
-)}
-
-sub supported_dtypes { return (
-    # claim to support all types needed for HTTP
-    # we only need to make sure, that we keep type boundaries when modifying
-    # e.g. don't make header + body data out of header etc or issue replace
-    # for part of header only
-    IMP_DATA_MESSAGE_HDR,
-    IMP_DATA_CHUNK_HDR,
-    IMP_DATA_CHUNK_TRAILER,
-    IMP_DATA_STREAM,
 )}
 
 sub new_analyzer {
@@ -46,31 +33,24 @@ sub new_analyzer {
     return $self;
 }
 
-sub data {
-    my ($self,$dir,$data) = @_;
+sub request_hdr {
+    my ($self,$hdr) = @_;
+    # modify if necessary, rest of request can be forwarded w/o inspection
+    my $len = length($hdr);
     my @rv;
-    if ( $dir == 0 ) {
-	return if $self->{rqhdr_done};
-
-	# request header
-	# modify if necessary, rest of request can be forwarded w/o inspection
-	my $len = length($data);
-	if ( defined( my $newdata = _modify_rqhdr($self,$data))) {
-	    push @rv, [ IMP_REPLACE,0,$len,$newdata ];
-	}
-	push @rv, [ IMP_PASS,0,IMP_MAXOFFSET ];
-	$self->{rqhdr_done} = 1;
-    } else {
-	return if $self->{rphdr_done};
-
-	# response header
-	_analyze_rphdr($self,$data);
-	push @rv, [ IMP_PASS,1,IMP_MAXOFFSET ]; # upgrade to IMP_PASS
-	$self->{rphdr_done} = 1;
+    if ( defined( my $newhdr = _modify_rqhdr($self,$hdr))) {
+	push @rv, [ IMP_REPLACE,0,$len,$newhdr ];
     }
-
-    $self->run_callback(@rv);
+    $self->run_callback(@rv,[ IMP_PASS,0,IMP_MAXOFFSET ]);
 }
+
+sub response_hdr {
+    my ($self,$hdr) = @_;
+    # response header
+    _analyze_rphdr($self,$hdr);
+    $self->run_callback([ IMP_PASS,1,IMP_MAXOFFSET ]); # upgrade to IMP_PASS
+}
+
 
 {
     # FIXME - should expire after a short time

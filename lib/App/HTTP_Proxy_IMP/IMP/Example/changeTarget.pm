@@ -5,14 +5,13 @@
 use strict;
 use warnings;
 package App::HTTP_Proxy_IMP::IMP::Example::changeTarget;
-use base 'Net::IMP::Base';
-use fields qw(rqhdr_done);
+use base 'Net::IMP::HTTP::Request';
 
 use Net::IMP;
 use Net::IMP::Debug;
 
 my $target = 'www.spiegel.de';
-sub USED_RTYPES { ( IMP_PASS ) }
+sub RTYPES { ( IMP_PASS,IMP_REPLACE,IMP_DENY ) }
 
 sub new_analyzer {
     my ($class,%args) = @_;
@@ -24,23 +23,23 @@ sub new_analyzer {
     return $self;
 }
 
-sub data {
-    my ($self,$dir,$data) = @_;
 
-    # we should not get these except for eof
-    return if $self->{rqhdr_done} or $dir == 1;
-
-    # we except to get the full request header inside the first packet,
-    # because the proxy handles it this way
-    my $len = length($data) or return;
-    $data =~s{\A(\S+\s+http://)([^\s/]+)}{$1$target}; # first line absoluteURI
-    $data =~s{^Host:\s*(.*)}{Host: www.spiegel.de}mi; # host header
-    $self->{rqhdr_done} = 1;
+sub request_hdr {
+    my ($self,$hdr) = @_;
+    my $len = length($hdr) or return;
+    $hdr =~s{\A(\S+\s+http://)([^\s/]+)}{$1$target}; # first line absoluteURI
+    $hdr =~s{^Host:\s*(.*)}{Host: www.spiegel.de}mi; # host header
     $self->run_callback( 
-	[ IMP_REPLACE,0,$len,$data ], # replace header
+	[ IMP_REPLACE,0,$len,$hdr ],  # replace header
 	[ IMP_PASS,0,IMP_MAXOFFSET ], # pass thru everything else
     );
 }
+
+# will not be called
+sub request_body {}
+sub response_hdr {}
+sub response_body {}
+sub any_data {}
 
 1;
 
