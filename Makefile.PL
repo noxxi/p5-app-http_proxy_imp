@@ -6,6 +6,7 @@ WriteMakefile(
     PREREQ_PM => {
 	'Net::Inspect' => 0.22,
 	'Net::IMP' => 0.49,
+	'Net::IMP::HTTP' => 0.1,
 	'AnyEvent' => 6.12,
     },
     EXE_FILES => [ 'bin/http_proxy_imp' ],
