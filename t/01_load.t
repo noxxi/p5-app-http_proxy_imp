@@ -3,13 +3,12 @@
 use strict;
 use warnings;
 
-use Test::More tests => 4;
+use Test::More tests => 3;
 
 eval 'use App::HTTP_Proxy_IMP';
 cmp_ok( $@,'eq','', 'loading App::HTTP_Proxy_IMP' );
 
 # check, that the plugins we ship can be loaded
-check_load('LogFormData');
 check_load('Example::changeTarget');
 
 # CSRFprotect needs additional modules, so first try to load it

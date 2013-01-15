@@ -6,7 +6,6 @@ lib/App/HTTP_Proxy_IMP/Debug.pm
 lib/App/HTTP_Proxy_IMP/IMP.pm
 lib/App/HTTP_Proxy_IMP/IMP/CSRFprotect.pm
 lib/App/HTTP_Proxy_IMP/IMP/Example/changeTarget.pm
-lib/App/HTTP_Proxy_IMP/IMP/LogFormData.pm
 lib/App/HTTP_Proxy_IMP/Relay.pm
 lib/App/HTTP_Proxy_IMP/Request.pm
 t/01_load.t

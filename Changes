@@ -1,3 +1,5 @@
+0.9 2013-01-15
+- moved LogFormData to Net::IMP::HTTP dist
 0.8 2013-01-14
 - add forgotten requirement Net::IMP::HTTP to Makefile.PL
 0.7 2013-01-11
