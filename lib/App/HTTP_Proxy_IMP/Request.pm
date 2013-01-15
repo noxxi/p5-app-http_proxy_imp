@@ -66,6 +66,7 @@ sub in_request_header {
 	    my ($self,$data,$eof,$time) = @_;
 	    _send_and_remove($self,1,$data,IMP_DATA_HTTPRQ_CONTENT) 
 		if $$data ne '';
+	    _send($self,1,'',IMP_DATA_HTTPRQ_CONTENT) if $eof;
 	    return '';
 	},
 	response_header => sub {
@@ -113,6 +114,7 @@ sub in_request_header {
 	    }
 	    _send_and_remove($self,0,$data,IMP_DATA_HTTPRQ_CONTENT)
 		if $$data ne '';
+	    _send($self,0,'',IMP_DATA_HTTPRQ_CONTENT) if $eof;
 	    return '';
 	},
     });

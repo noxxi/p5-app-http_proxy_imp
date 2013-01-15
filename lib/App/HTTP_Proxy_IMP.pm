@@ -15,7 +15,7 @@ use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG $DEBUG_RX);
 use Net::Inspect::Debug qw(%TRACE);
 use Carp 'croak';
 
-our $VERSION = 0.9;
+our $VERSION = 0.91;
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -34,7 +34,7 @@ BEGIN {
 sub new {
     my ($class,@args) = @_;
     my $self = fields::new($class);
-    $self->{impns} = [qw(App::HTTP_Proxy_IMP::IMP Net::IMP)];
+    $self->{impns} = [qw(App::HTTP_Proxy_IMP::IMP Net::IMP::HTTP Net::IMP)];
     %$self = %{ shift(@args) } if @args && ref($args[0]);
     $self->getoptions(@args) if @args;
     return $self;

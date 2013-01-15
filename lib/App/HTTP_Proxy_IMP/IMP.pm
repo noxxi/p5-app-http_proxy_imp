@@ -128,7 +128,9 @@ sub in {
     my App::HTTP_Proxy_IMP::IMP $self = shift;
     my ($dir,$data,$type) = @_;
     my $anl = $self->{analyzer} or die;
-    return $anl->data($dir,'') if $data eq ''; # eof
+
+    # FIXME: offset of 0 might not be correct
+    return $anl->data($dir,'',0,$type) if $data eq ''; # eof
 
     # add data to buf
     my $buf = $self->{buf}[$dir];
@@ -174,7 +176,7 @@ sub in {
 	} else {
 	    # part of buffer
 	    push @inspect, [
-		$lastbuf->[0] + $blen - $len.
+		$lastbuf->[0] + $blen - $len,
 		substr( $lastbuf->[1],-$len,$len),
 		$type
 	    ];
@@ -366,6 +368,7 @@ sub _imp_callback {
 	    } else {
 		# replace complete buf
 		$fwd = $buf0;
+		$fwd->[1] = $newdata;
 		$fwd->[3] = 1; # set as changed
 
 		# remove buf
