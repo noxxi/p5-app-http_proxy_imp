@@ -326,7 +326,7 @@ sub write:method {
     if ( $self->{wbuf} ne '' 
 	&& ! $self->{wsrc}{$from}++ ) {
 	# newly stalled, disable reads on $from for now
-	$self->{relay}->mask($from,0);
+	$self->{relay}->mask($from, r=>0);
     }
     return $n;
 }
@@ -360,7 +360,7 @@ sub _writebuf {
 	}
         # enable read again on stalled fd
 	if ( my $src = $self->{wsrc} ) {
-	    $self->{relay}->mask($_,1) for (keys %$src);
+	    $self->{relay}->mask($_, r=>1) for (keys %$src);
 	}
     }
     return $n;
