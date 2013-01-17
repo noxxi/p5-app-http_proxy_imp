@@ -36,7 +36,7 @@ sub in_request_header {
     # the call and disable reading from client
     if ( my $spool = $self->{conn}{spool} ) {
 	push @$spool,['in_request_header',@_];
-	$self->{conn}{relay}->mask(0,r=>0);
+	$self->{conn}{relay}->mask(r=>0);
 	return 1;
     }
 
@@ -132,7 +132,7 @@ sub in_request_body {
     my $spool = $conn->{spool} ||= ! $self->{connected} && [];
     if ($spool) {
 	$self->xdebug("spooling request body");
-	$conn->{relay}->mask(0,r=>0) if $_[1] ne ''; # data given
+	$conn->{relay}->mask(r=>0) if $_[1] ne ''; # data given
 	push @$spool,['in_request_body',@_];
 	return 1;
     }
@@ -233,7 +233,7 @@ sub _inrqhdr_connect_upstream {
 	    # maintained in Net::Inspect::L7::HTTP
 	    $self->{conn}->in(1,"HTTP/1.0 200 OK\r\n\r\n",0,$time);
 	}
-	$self->{conn}{relay}->mask(1,r=>1);
+	$self->{conn}{relay}->mask(r=>1);
 	_call_spooled($self, { in_request_body => 1 });
     };
     $self->{conn}{relay}->connect(1,$host,$port,$connect_cb);
@@ -259,7 +259,7 @@ sub _call_spooled {
     unshift @{ $self->{conn}{spool} }, @$spool if @$spool;
 
     # enable read on client side again if nothing in spool
-    $self->{conn}{relay}->mask(0,r=>1) if ! $self->{conn}{spool};
+    $self->{conn}{relay}->mask(r=>1) if ! $self->{conn}{spool};
 }
 
 
