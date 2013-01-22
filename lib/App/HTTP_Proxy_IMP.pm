@@ -15,7 +15,7 @@ use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG $DEBUG_RX);
 use Net::Inspect::Debug qw(%TRACE);
 use Carp 'croak';
 
-our $VERSION = '0.91_2';
+our $VERSION = '0.92';
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -93,6 +93,7 @@ sub start {
     my @listen;
     $self->{addr} = [ $self->{addr} ] if $self->{addr} && ! ref($self->{addr});
     for my $addr (@{$self->{addr}}) {
+	my ($addr,$upstream) = split('=',$addr,2);
 	my $srv = $sockclass->new(
 	    LocalAddr => $addr,
 	    Listen    => 10,
@@ -103,7 +104,7 @@ sub start {
 	    poll => 'r',
 	    cb => sub {
 		my $cl = $srv->accept or return;
-		App::HTTP_Proxy_IMP::Relay->new($cl,$conn);
+		App::HTTP_Proxy_IMP::Relay->new($cl,$upstream,$conn);
 	    }
 	);
     }
@@ -188,8 +189,10 @@ sub usage {
 HTTP proxy, which can inspect and modify requests and responses before
 forwarding using Net::IMP plugins.
 
-$cmd Options* [ip:port]+
+$cmd Options* [ip:port|ip:port=upstream_ip:port]+
 ip:port - listen address(es) for the proxy
+ip:port=upstream_ip:port - listen adress and upstream proxy 
+
 Options:
   -h|--help        show usage
   -F|--filter F    add named IMP plugin as filter, can be used multiple times
@@ -213,6 +216,9 @@ start proxy at 127.0.0.1:8888 and log all form fields
  $cmd --filter LogFormData 127.0.0.1:8888
 start proxy at 127.0.0.1:8888 with CSRF protection plugin
  $cmd --filter CSRFprotect 127.0.0.1:8888
+start proxy at 127.0.0.1:8888 with CSRF protection plugin, using upstream 
+proxy proxy:8888
+ $cmd --filter CSRFprotect 127.0.0.1:8888=proxy:8888
 
 USAGE
     exit(2);

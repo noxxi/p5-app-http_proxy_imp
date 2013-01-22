@@ -193,8 +193,10 @@ sub _inrqhdr_connect_upstream {
     $self->{acct}{method} = $method;
     $self->{acct}{uri} = $uri;
 
+    my $upstream = $self->{meta}{upstream};
+
     my $hdr_changed = 0;
-    my ($proto,$host,$port,$page);
+    my ($proto,$host,$port,$page,$keep_alive);
     if ( $method eq 'CONNECT' ) {
 	($host,$port) = $uri =~m{^(.*?)(?:\:(\d+))?$};
 	$port ||= 443;
@@ -213,11 +215,24 @@ sub _inrqhdr_connect_upstream {
 	return $self->fatal("bad proto: $proto"),undef
 	    if $proto ne 'http';
 
-	# rewrite method://host/page to /page
-	$hdr_changed = 1 if $$hdr =~s{\A(\w+[ \t]+)(\w+://[^/]+)}{$1};
+	if ( $upstream ) {
+	    # rewrite /page to method://host/page 
+	    my $p = $port == 80 ? '':":$port";
+	    $hdr_changed = 1 if $$hdr =~s{\A(\w+[ \t]+)(/)}{$1$proto://$host$p$2};
+	    ($host,$port) = @$upstream;
+	} else {
+	    # rewrite method://host/page to /page
+	    $hdr_changed = 1 if $$hdr =~s{\A(\w+[ \t]+)(\w+://[^/]+)}{$1};
+	}
 
 	# remove Proxy-Connection header
 	$hdr_changed = 1 if $$hdr =~s{^Proxy-Connection:.*(\n[ \t].*)*\n}{}img;
+
+	# try to reuse connection of possible
+	$keep_alive = ($1 eq 'keep-alive') ? 1:0
+	    while ( $$hdr =~m{\nConnection:[ \t]*(close|keep-alive)}ig );
+	# implicit keep-alive in HTTP/1.1
+	$keep_alive //= $$hdr =~m{\A.*HTTP/1\.1\r?\n}; 
     }
 
     $self->xdebug("new request $method $proto://$host:$port$page");
@@ -236,7 +251,7 @@ sub _inrqhdr_connect_upstream {
 	$self->{conn}{relay}->mask(1,r=>1);
 	_call_spooled($self, { in_request_body => 1 });
     };
-    $self->{conn}{relay}->connect(1,$host,$port,$connect_cb);
+    $self->{conn}{relay}->connect(1,$host,$port,$connect_cb,!$keep_alive);
     return $hdr_changed;
 }
 

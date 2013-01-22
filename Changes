@@ -1,3 +1,6 @@
+0.92 2013-01-22
+- added support for upstream proxy via listen_ip:port=upstream_host:port syntax
+- fixed stalled handling in Relay.pm
 0.91 2013-01-15
 - extend default search path with Net::IMP::HTTP
 - fixes, especially with replacements

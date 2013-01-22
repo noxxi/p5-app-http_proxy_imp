@@ -17,15 +17,22 @@ sub relays { return grep { $_ } @relays }
 
 # creates new relay and puts it into @relays as weak reference
 sub new {
-    my ($class,$cfd,$conn) = @_;
+    my ($class,$cfd,$upstream,$conn) = @_;
     my $self = fields::new($class);
     debug("create relay $self");
+
+    if ( $upstream && ! ref($upstream)) {
+	$upstream =~m{\A(?:\[([a-f\d:.]+)\]|([\da-z_\-.]+)):(\d+)\Z} or
+	    die "invalid upstream specification: $upstream";
+	$upstream = [ $1||$2, $3 ];
+    }
 
     my $cobj = $conn->new_connection({
 	daddr => $cfd->sockhost,
 	dport => $cfd->sockport,
 	saddr => $cfd->peerhost,
 	sport => $cfd->peerport,
+	upstream => $upstream,
     },$self);
 
     #debug("create connection $cobj");
