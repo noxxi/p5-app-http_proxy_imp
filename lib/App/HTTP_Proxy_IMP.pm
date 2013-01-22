@@ -15,7 +15,7 @@ use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG $DEBUG_RX);
 use Net::Inspect::Debug qw(%TRACE);
 use Carp 'croak';
 
-our $VERSION = '0.92';
+our $VERSION = '0.93';
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -62,6 +62,9 @@ sub start {
 		next;
 	    }
 
+	    my $f = $f; # copy
+	    my $args = $f =~s{=(.*)}{} && $1;
+
 	    my $found;
 	    for my $prefix ('', map { "${_}::" } @$ns) {
 		my $mod = $prefix.$f;
@@ -71,7 +74,8 @@ sub start {
 		}
 	    }
 	    croak("IMP module $f could not be loaded: $@") if ! $found;
-	    push @mod,$found;
+	    my %args = $args ? $found->str2cfg($args) :();
+	    push @mod, $found->new_factory(%args)
 	}
 	$imp_factory = App::HTTP_Proxy_IMP::IMP->new_factory(@mod);
     }

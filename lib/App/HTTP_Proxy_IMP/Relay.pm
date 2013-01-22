@@ -56,8 +56,20 @@ sub account {
     if ( my $t = delete $args{start} ) {
 	$args{duration} = AnyEvent->now - $t;
     }
-    my $msg = join(' ', map { "$_=$args{$_}" } sort keys %args);
-    print STDERR "ACCT $msg\n";
+    my @msg;
+    for( sort keys %args ) {
+	my $t;
+	my $v = $args{$_};
+	if ( ! defined $v ) {
+	    next;
+	} elsif ( ref($v) eq 'ARRAY') {
+	    $t = "$_=[".join(',',@$v)."]";
+	} elsif ( defined $v ) {
+	    $t = "$_=$v"
+	}
+	push @msg,$t;
+    }
+    print STDERR "ACCT @msg\n";
 }
 
 sub xdebug {

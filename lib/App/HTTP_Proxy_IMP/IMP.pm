@@ -367,20 +367,21 @@ sub _imp_callback {
 
 	    } else {
 		# replace complete buf
-		$fwd = $buf0;
-		$fwd->[1] = $newdata;
-		$fwd->[3] = 1; # set as changed
 
 		# remove buf
 		shift(@$buf);
 		if ( ! @$buf ) {
 		    # add dummy
 		    push @$buf, [
-			$buf0->[0] + length($buf0->[1]),
+			$buf0->[0] + $len0,
 			'',
 			undef
 		    ];
 		}
+
+		$fwd = $buf0;
+		$fwd->[1] = $newdata;
+		$fwd->[3] = 1; # set as changed
 	    }
 
 	    # propagate change

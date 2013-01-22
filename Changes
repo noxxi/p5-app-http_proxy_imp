@@ -1,3 +1,7 @@
+0.93 2013-01-22
+- add FakeResponse plugin to hijack requests and send alternate response 
+  w/o contacting server
+- fixed upstream handling for https tunnel (e.g. CONNECT)
 0.92 2013-01-22
 - added support for upstream proxy via listen_ip:port=upstream_host:port syntax
 - fixed stalled handling in Relay.pm

@@ -132,7 +132,7 @@ sub in_request_body {
     my $spool = $conn->{spool} ||= ! $self->{connected} && [];
     if ($spool) {
 	$self->xdebug("spooling request body");
-	$conn->{relay}->mask(0,r=>0) if $_[1] ne ''; # data given
+	( $conn->{relay} || return )->mask(0,r=>0) if $_[1] ne ''; # data given
 	push @$spool,['in_request_body',@_];
 	return 1;
     }
@@ -212,6 +212,17 @@ sub _inrqhdr_connect_upstream {
 	    # dont' forward anything, but don't change header :)
 	    $hdr = \( '' );
 	}
+
+    } elsif ( $uri eq 'internal://imp' ) {
+	# the plugin provides the data itself by replacing a dummy response
+	# header + body with the intended data
+	$self->{conn}->in(1,
+	    "HTTP/1.1 200 Ok\r\n".
+	    "Content-type: internal/internal\r\n".
+	    "Content-length: 2\r\n".
+	    "\r\n".
+	    "12",1);
+	return;
 
     } else {
 	($proto,$host,$port,$page) = ($1,$2,$3||80,$4)
