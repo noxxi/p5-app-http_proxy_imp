@@ -203,8 +203,16 @@ sub _inrqhdr_connect_upstream {
 	$host =~s{^\[(.*)\]$}{$1};
 	$proto = 'https';
 	$page = '';
-	# dont' forward anything, but don't change header :)
-	$hdr = \( '' );
+
+	$self->xdebug("new request $method $host:$port");
+
+	if ( $upstream ) {
+	    ($host,$port) = @$upstream;
+	} else {
+	    # dont' forward anything, but don't change header :)
+	    $hdr = \( '' );
+	}
+
     } else {
 	($proto,$host,$port,$page) = ($1,$2,$3||80,$4)
 	    if $uri =~m{^(?:(\w+)://([^/\s]+?)(?::(\d+))?)?(/.*|$)};
@@ -214,6 +222,8 @@ sub _inrqhdr_connect_upstream {
 	$proto or return $self->fatal('bad request: '.$$hdr),undef;
 	return $self->fatal("bad proto: $proto"),undef
 	    if $proto ne 'http';
+
+	$self->xdebug("new request $method $proto://$host:$port$page");
 
 	if ( $upstream ) {
 	    # rewrite /page to method://host/page 
@@ -235,10 +245,10 @@ sub _inrqhdr_connect_upstream {
 	$keep_alive //= $$hdr =~m{\A.*HTTP/1\.1\r?\n}; 
     }
 
-    $self->xdebug("new request $method $proto://$host:$port$page");
     $time ||= AnyEvent->now;
     my $connect_cb = sub {
 	$self->{connected} = 1;
+	#debug("connected to $host.$port");
 	$self->{acct}{ctime} = AnyEvent->now - $time;
 	if ($$hdr ne '') {
 	    _forward($self,0,1,$$hdr);
