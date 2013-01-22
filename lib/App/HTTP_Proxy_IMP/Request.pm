@@ -169,13 +169,13 @@ sub in_response_body {
     my ($self,$data,$eof,$time) = @_;
     $self->xdebug("in_response_body len=".length($data));
     my $rv = $self->SUPER::in_response_body($data,$eof,$time);
-    if ( $eof ) {
+    if ( $eof and my $r = $self->{conn}{relay} ) {
 	$self->xdebug("end of response, te=$self->{resp_te}");
-	$self->{conn}{relay}->account(%{ $self->{meta}}, %{ $self->{acct}});
+	$r->account(%{ $self->{meta}}, %{ $self->{acct}});
 	# any more spooled requests (pipelining)?
 	if ( $self->{resp_te} eq 'E' ) {
 	    # eof to signal end of request
-	    $self->{conn}{relay}->close;
+	    $r->close;
 	    return $rv;
 	}
 	_call_spooled($self);

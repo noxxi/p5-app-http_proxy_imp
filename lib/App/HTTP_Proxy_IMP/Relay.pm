@@ -336,7 +336,7 @@ sub write:method {
     if ( $self->{wbuf} eq '' ) {
 	# no buffered data, set as buffer and try to write immediately
 	$self->{wbuf} = $data;
-	$n = _writebuf($self,$from);
+	$n = _writebuf($self,$from) // return; # fatal?
     } else {
 	# only append to buffer, will be written on write ready
 	$self->{wbuf} .= $data;
