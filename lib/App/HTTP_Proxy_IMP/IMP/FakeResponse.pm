@@ -18,18 +18,13 @@ sub new_factory {
     return $class->SUPER::new_factory(%args);
 }
 
-sub new_analyzer {
-    my ($factory,%args) = @_;
-    my $self = $factory->SUPER::new_analyzer(%args);
-    return $self;
-}
-
 
 sub request_hdr {
     my ($self,$hdr) = @_;
     my $len = length($hdr) or return;
 
     my ($page) = $hdr =~m{\A\w+ +(\S+)};
+    $page =~s{\?.*}{}; # strip query string
     my $host = $page =~s{^\w+://([^/]+)}{} && $1;
     if ( ! $host ) {
 	($host) = $hdr =~m{\nHost: *(\S+)}i or do {
@@ -42,6 +37,7 @@ sub request_hdr {
     my $dir = $self->{factory_args}{root};
     my $fh;
     for ( "$dir/$host:$port/$page", "$dir/$host/$page" ) {
+	$_ .= "INDEX.html" if m{/$};
 	-f $_ && -r _ or next;
 	open($fh,'<',$_) or next;
     }
@@ -69,7 +65,6 @@ sub request_hdr {
     );
 }
 
-my $response_body = "alert('pOwned!')";
 sub response_hdr {
     my ($self,$hdr) = @_;
     $self->{ignore} and return;
@@ -131,9 +126,16 @@ located.
 When getting a request for http://host:port/page it will search inside C<root>
 for a file named either C<host:port/page> or C<host/page> and return this as
 response.
+The query string part of the URI will be ignored when looking for the on disk
+representation.
+If the page ends with a C</> C<INDEX.html> will be added when searching for
+the data.
+
 The response file should include HTTP header and body, any Content-length header
 will be corrected to have the correct value for the response body.
 
+This module works in concert with L<Net::IMP::HTTP::SaveResponse>, e.g. data
+saved with L<Net::IMP::HTTP::SaveResponse> will be found by this module.
 
 =head1 AUTHOR
 
