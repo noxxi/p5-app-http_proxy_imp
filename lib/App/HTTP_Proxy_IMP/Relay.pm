@@ -84,6 +84,14 @@ sub xdebug {
 }
 
 
+# non-fatal problem
+sub error {
+    my ($self,$reason) = @_;
+    warn "[error] ".$self->{conn}->id." $reason\n";
+    return 0;
+}
+
+# fatal problem - close connection
 sub fatal {
     my ($self,$reason) = @_;
     warn "[fatal] ".$self->{conn}->id." $reason\n";
@@ -105,6 +113,11 @@ sub mask {
 	return;
     };
     $fd->mask($rw,$v);
+}
+
+sub fd {
+    my ($self,$dir) = @_;
+    return $self->{fds}[$dir];
 }
 
 # send some data via fd dir

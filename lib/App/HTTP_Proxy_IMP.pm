@@ -15,7 +15,7 @@ use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG $DEBUG_RX);
 use Net::Inspect::Debug qw(%TRACE);
 use Carp 'croak';
 
-our $VERSION = '0.931';
+our $VERSION = '0.94';
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -86,12 +86,6 @@ sub start {
 	pcapdir     => $pcapdir, 
 	imp_factory => $imp_factory
     );
-
-    # add hooks for unchunking and decompression
-    # FIXME - add these hooks dynamically if we want to inspect content
-    # and not only header
-    $req->add_hooks('unchunk','uncompress_te','uncompress_ce');
-
 
     # create listeners
     my @listen;

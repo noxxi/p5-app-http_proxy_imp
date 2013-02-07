@@ -15,7 +15,7 @@ use Scalar::Util 'weaken';
 use fields (
     # all connections
     'pcapdir',     # dir for writing pcaps
-    'imp_factory', # Net::IMP factory
+    'imp_factory', # App::HTTP_Proxy_IMP::IMP factory
     # per connection
     'spool',       # any data which cannot be processed yet?
     'pcapw',       # Net::PcapWriter object
@@ -27,7 +27,7 @@ sub new {
     my $self = $class->SUPER::new($upper_flow);
     %$self = ( %$self, %args ) if %args;
     if ( ref($class)) { # from factory
-	$self->{pcapdir} ||= $class->{imp_factory};
+	$self->{pcapdir} ||= $class->{pcapdir};
 	$self->{imp_factory} ||= $class->{imp_factory};
     }
     return $self;

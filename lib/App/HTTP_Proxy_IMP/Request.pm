@@ -7,338 +7,555 @@ use strict;
 use warnings;
 
 package App::HTTP_Proxy_IMP::Request;
-use base 'Net::Inspect::L7::HTTP::Request::InspectChain';
+use base 'Net::Inspect::Flow';
 use fields (
-    'connected',  # is upstream already connected?
-    'chunked',    # chunking status if we do chunked output (undef: not started)
-    'resp_te',    # transfer encoding used to output response body: [C]hunked, 
-                  # [E]of, [K]eep existing
-    'acct',       # some accounting data
-    'imp_filter', # App::HTTP_Proxy_IMP::IMP object
+    'conn',         # App::HTTP_Proxy_IMP::Connection object
+    'meta',         # meta data
+    'me_proxy',     # defined if I'm proxy, if true will be used for Via:
+    'up_proxy',     # address of upstream proxy if any
+    'acct',         # some accounting data
+    'connected',    # if connected to server
+
+    'imp_analyzer', # App::HTTP_Proxy_IMP::IMP object
+    'defer_rqhdr',  # deferred request header (wait until body length known)
+    'defer_rqbody', # deferred request body (wait until header can be sent)
+
+    'method',       # request method
+    'rq_version',   # version of request
+    'rp_encoder',   # sub to encode response body (chunked)
+    'keep_alive',   # do we use keep_alive in response
+
 );
-use Net::IMP::HTTP; # constants
+
 use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG);
+use Scalar::Util 'weaken';
+use Net::Inspect::Debug 'trace';
+use Net::IMP qw(:DEFAULT :log);
+use Net::IMP::HTTP; # constants
+use Sys::Hostname 'hostname';
 
+my $HOSTNAME = hostname();
+
+sub DESTROY { $DEBUG && debug("destroy request"); }
 sub new_request {
-    my ($self,$meta,$conn) = @_;
-    my $obj = $self->SUPER::new_request($meta,$conn);
-    $obj->{acct} = { Id => $obj->id };
-    if ( my $factory = $conn->{imp_factory} ) {
-	$obj->{imp_filter} = $factory->new_analyzer( $obj,$meta);
+    my ($factory,$meta,$conn) = @_;
+    $DEBUG && debug("new request");
+    my $self = $factory->new;
+
+    $self->{meta} = $meta;
+    weaken($self->{conn} = $conn);
+    $self->{defer_rqhdr} = $self->{defer_rqbody} = '';
+
+    $self->{acct} = { Id => $self->id };
+    if ( my $f = $conn->{imp_factory} ) {
+	$self->{imp_analyzer} = $f->new_analyzer($self,$meta);
     }
-    return $obj;
+
+    $self->{me_proxy} = $HOSTNAME;
+    $self->{up_proxy} = $meta->{upstream};
+
+
+    return $self;
 }
 
-sub in_request_header {
+sub xdebug {
     my $self = shift;
-
-    # if we we have an open request inside this connection defer
-    # the call and disable reading from client
-    if ( my $spool = $self->{conn}{spool} ) {
-	push @$spool,['in_request_header',@_];
-	$self->{conn}{relay}->mask(0,r=>0);
-	return 1;
-    }
-
-    my ($hdr,$time) = @_;
-    my ($method) = $hdr =~m{^(\w+)};
-    if ( $method !~ m{^(?:GET|POST|PUT|DELETE|TRACE|OPTIONS|CONNECT)$} ) {
-	$self->fatal("cannot handle method $method");
-	return 1;
-    }
-
-    $self->{acct}{start} = $time;
-
-    # FIXME add decompression only if we really need to inspect content
-    $self->add_hooks('unchunk','uncompress_ce','uncompress_te');
-
-    $self->add_hooks({
-	name => 'fwd-data',
-	request_header => sub {
-	    my ($self,$data,$time) = @_;
-	    if ( my $filter = $self->{imp_filter} ) {
-		$filter->in(0,$$data,IMP_DATA_HTTPRQ_HEADER);
-	    } else {
-		goto &_inrqhdr_connect_upstream,
-	    }
-	},
-	request_body => sub {
-	    my ($self,$data,$eof,$time) = @_;
-	    _send_and_remove($self,1,$data,IMP_DATA_HTTPRQ_CONTENT) 
-		if $$data ne '';
-	    _send($self,1,'',IMP_DATA_HTTPRQ_CONTENT) if $eof;
-	    return '';
-	},
-	response_header => sub {
-	    my ($self,$hdr,$time) = @_;
-	    $self->{acct}{code} = $1 if $$hdr =~m{\AHTTP/1\.\d\s+(\d+)};
-
-	    # if we might change data remove content-length
-	    # and transfer content chunked if HTTP/1.1
-	    my $filter = $self->{imp_filter};
-	    my $hdr_changed =0;
-
-	    if ( $filter && $filter->can_modify ) {
-		$hdr_changed = 1 if $$hdr =~s{^Content-length:.*(\n[ \t].*)*\n}{}img;
-		if ( $$hdr =~m{\A.* HTTP/1\.1\r?\n} ) {
-		    $hdr_changed = 1;
-		    $$hdr =~s{^Transfer-Encoding:.*(\n[ \t].*)*\n}{}img;
-		    $$hdr =~s{\n}{\nTransfer-Encoding: chunked\r\n};
-		    $self->{resp_te} = 'C';
-		} else {
-		    $self->{resp_te} = 'E';
-		}
-	    } else {
-		$self->{resp_te} = 
-		    $$hdr =~m{^Transfer-Encoding:\s*chunked}mi ? 'C' :
-		    $$hdr =~m{^Content-length:}mi ? 'K' :
-		    'E';
-	    } 
-
-	    _send($self,0,$$hdr,IMP_DATA_HTTPRQ_HEADER);
-	    return $hdr_changed;
-	},
-	response_body => sub {
-	    my ($self,$data,$eof,$time) = @_;
-	    $self->xdebug("response_body len=".length($$data));
-	    if ( $self->{resp_te} eq 'C' ) {
-		# add chunk header
-		if ( $$data ne '' ) {
-		    $$data = sprintf("%s%x\r\n%s",
-			$self->{chunked}++ ? "\r\n":"",  # CRLF after chunk
-			length($data),                   # length as hex
-			$$data
-		    );
-		}
-		$$data .= "0\r\n\r\n" if $eof;
-	    }
-	    _send_and_remove($self,0,$data,IMP_DATA_HTTPRQ_CONTENT)
-		if $$data ne '';
-	    _send($self,0,'',IMP_DATA_HTTPRQ_CONTENT) if $eof;
-	    return '';
-	},
-    });
-
-    $self->{conn}{spool} ||= [];
-    return $self->SUPER::in_request_header($hdr,$time);
+    my $relay = $self->{conn}{relay} or return;
+    $relay->xdebug(@_);
 }
 
-sub in_request_body {
+sub id {
     my $self = shift;
-    my $conn = $self->{conn};
-
-    # defer call if we have another open request or if the current request
-    # has no connected upstream yet
-    my $spool = $conn->{spool} ||= ! $self->{connected} && [];
-    if ($spool) {
-	$self->xdebug("spooling request body");
-	( $conn->{relay} || return )->mask(0,r=>0) if $_[1] ne ''; # data given
-	push @$spool,['in_request_body',@_];
-	return 1;
-    }
-
-    return $self->SUPER::in_request_body(@_);
-}
-
-
-sub in_data {
-    my ($self,$from,$data,$eof,$time) = @_;
-    # forward data to other side
-    my $to = $from?0:1;
-    $self->xdebug("%s bytes from %s to %s",length($data),$from,$to);
-    _send($self,$to,$data,IMP_DATA_HTTPRQ_DATA) if $data ne '';
-    if ($eof) {
-	$self->{conn}{relay}->shutdown($from,0);
-	# the first shutdown might cause the relay to close
-	$self->{conn}{relay}->shutdown($to,1) if $self->{conn}{relay};
-    }
-    return length($data);
+    $self->{conn} or return '';
+    return $self->{conn}{connid}.'.'.$self->{meta}{reqid}
 }
 
 sub fatal {
     my ($self,$reason) = @_;
     warn "[fatal] ".$self->id." $reason\n";
     if ( my $conn = $self->{conn} ) {
-	my $relay =  $conn->{relay};
-	$relay->account(%{ $self->{meta}}, %{ $self->{acct}});
-	$relay->close;
+        my $relay =  $conn->{relay};
+        $relay->account(%{ $self->{meta}}, %{ $self->{acct}});
+        $relay->close;
     }
 }
 
-sub in_response_body {
-    my ($self,$data,$eof,$time) = @_;
-    $self->xdebug("in_response_body len=".length($data));
-    my $rv = $self->SUPER::in_response_body($data,$eof,$time);
-    if ( $eof and my $r = $self->{conn}{relay} ) {
-	$self->xdebug("end of response, te=$self->{resp_te}");
-	$r->account(%{ $self->{meta}}, %{ $self->{acct}});
-	# any more spooled requests (pipelining)?
-	if ( $self->{resp_te} eq 'E' ) {
-	    # eof to signal end of request
-	    $r->close;
-	    return $rv;
-	}
-	_call_spooled($self);
-    }
-    return $rv
+sub xtrace {
+    my $self = shift;
+    my $msg = shift;
+    $msg = "$$.$self->{conn}{connid}.$self->{meta}{reqid} $msg";
+    unshift @_,$msg;
+    goto &trace;
 }
 
 
-sub _inrqhdr_connect_upstream {
-    my ($self,$hdr,$time) = @_;
-    my $req = $self->request_header;
-    my $method = $req->method;
-    my $uri = $req->uri;
+############################################################################
+# process HTTP request header
+# called from HTTP connection object
+# if IMP plugin is configured it will send the received header to the plugin
+# and continue from the IMP callback to _request_header_after_imp.
+# if no IMP is configured it will immediatly go there
+############################################################################
 
-    $self->{acct}{method} = $method;
-    $self->{acct}{uri} = $uri;
-
-    my $upstream = $self->{meta}{upstream};
-
-    my $hdr_changed = 0;
-    my ($proto,$host,$port,$page,$keep_alive);
-    if ( $method eq 'CONNECT' ) {
-	($host,$port) = $uri =~m{^(.*?)(?:\:(\d+))?$};
-	$port ||= 443;
-	$host =~s{^\[(.*)\]$}{$1};
-	$proto = 'https';
-	$page = '';
-
-	$self->xdebug("new request $method $host:$port");
-
-	if ( $upstream ) {
-	    ($host,$port) = @$upstream;
-	} else {
-	    # dont' forward anything, but don't change header :)
-	    $hdr = \( '' );
-	}
-
-    } elsif ( $uri eq 'internal://imp' ) {
-	# the plugin provides the data itself by replacing a dummy response
-	# header + body with the intended data
-	$self->{conn}->in(1,
-	    "HTTP/1.1 200 Ok\r\n".
-	    "Content-type: internal/internal\r\n".
-	    "Content-length: 2\r\n".
-	    "\r\n".
-	    "12",1);
+my %default_port = ( http => 80, ftp => 21, https => 443 );
+sub in_request_header {
+    my ($self,$hdr,$time,$xhdr) = @_;
+    my $conn = $self->{conn} or return;
+    if ( $conn->{spool} ) {
+	# we have an active request, spool this new one (pipelining)
+	$DEBUG && debug("spool new request");
+	push @{$conn->{spool}}, [ \&in_request_header, @_ ];
 	return;
+    }
+
+    $conn->{spool} = []; # mark connection as processing request
+
+    my $relay = $conn->{relay} or return;
+    $DEBUG && debug("incoming request header ".$hdr);
+
+    $self->{method} = $xhdr->{method};
+    $self->{rq_version} = $xhdr->{version};
+
+    if ( my $imp = $self->{imp_analyzer} ) {
+	# pass thru IMP
+	$imp->request_header($hdr,$xhdr,
+	    \&_request_header_after_imp,$self);
+    } else {
+	# pass directly
+	_request_header_after_imp($self,$hdr,$xhdr);
+    }
+}
+
+
+############################################################################
+# process HTTP request header, which might have been modified by IMP
+# if not IMP is used this is called directly from in_request_header, else
+# via callback from IMP
+############################################################################
+sub _request_header_after_imp {
+    my ($self,$hdr,$xhdr) = @_;
+    my $conn  = $self->{conn}  or return;
+    my $relay = $conn->{relay} or return;
+
+    # with IMP method should not change
+    my $met = $self->{method};
+    die "method should not change in IMP plugin" 
+	if $met ne $xhdr->{method};
+
+    # work with original client version
+    my $version = $self->{rq_version};
+    my $url = $xhdr->{url};
+
+    my $head = $xhdr->{fields};
+    $xhdr->{junk} and $relay->error( 
+	"Bad request header lines: $xhdr->{junk}");
+
+    my ($proto,$host,$port,$path);
+    if ( $met eq 'CONNECT' ) {
+	# only possible if we work as proxy
+	return $self->fatal("connect request only allowed on proxy")
+	    if ! defined $self->{me_proxy};
+
+	# url should be host[:port]
+	$url =~m{^(?:\[([\w\-.:]+)\]|([\w\-.]+))(?::(\d+))$} or
+	    return $self->fatal("invalid host[:port] in connect: $url");
+	$proto = 'https';
+	$host = lc($1||$2);
+	$port = $3 || $default_port{$proto};
+	$path = '';
+	$url = ( $host =~m{:} ? "[$host]":$host ) . ":$port";
 
     } else {
-	($proto,$host,$port,$page) = ($1,$2,$3||80,$4)
-	    if $uri =~m{^(?:(\w+)://([^/\s]+?)(?::(\d+))?)?(/.*|$)};
-	($proto,$host,$port) = ('http',$2,$3||80)
-	    if ! $proto and
-	    $req->header('Host') =~m{^(\S+?)(?:(\d+))?$};
-	$proto or return $self->fatal('bad request: '.$$hdr),undef;
-	return $self->fatal("bad proto: $proto"),undef
-	    if $proto ne 'http';
+	if ( $url =~m{^(\w+)://(?:\[([\w\-.:]+)\]|([\w\-.]+))(?::(\d+))?(.+)?} ) {
+	    # absolute url, valid for HTTP/1.1 or proxy requests
+	    $proto = lc($1);
+	    $host = lc($2||$3);
+	    $port = $4;
+	    $path = $5 // '/';
 
-	$self->xdebug("new request $method $proto://$host:$port$page");
-
-	if ( $upstream ) {
-	    # rewrite /page to method://host/page 
-	    my $p = $port == 80 ? '':":$port";
-	    $hdr_changed = 1 if $$hdr =~s{\A(\w+[ \t]+)(/)}{$1$proto://$host$p$2};
-	    ($host,$port) = @$upstream;
 	} else {
-	    # rewrite method://host/page to /page
-	    $hdr_changed = 1 if $$hdr =~s{\A(\w+[ \t]+)(\w+://[^/]+)}{$1};
+	    # relativ url, needs Host header if we want to get target
+	    # from request
+	    $proto = 'http';
+	    $path = $url;
+	    if ( my $h = $head->{host} ) {
+		if (@$h>1) {
+		    $relay->RLog( 'BAD_HEADER_WARNING', {
+			msg => "Ignoring multiple host headers"});
+		}
+		$h->[0] =~m{^(?:\[([\w\-.:]+)\]|([\w\-.]+))(?::(\d+))$} or 
+		    return $self->fatal("bad host line '$_'");
+		$host = $1||$2;
+		$port = $3;
+	    } else {
+		return $self->fatal("cannot determine target host");
+	    }
 	}
 
-	# remove Proxy-Connection header
-	$hdr_changed = 1 if $$hdr =~s{^Proxy-Connection:.*(\n[ \t].*)*\n}{}img;
+	$port //= $default_port{$proto};
+	return $self->fatal("invalid port $port") 
+	    if ! $port or $port > 2**16-1;
 
-	# try to reuse connection of possible
-	$keep_alive = ($1 eq 'keep-alive') ? 1:0
-	    while ( $$hdr =~m{\nConnection:[ \t]*(close|keep-alive)}ig );
-	# implicit keep-alive in HTTP/1.1
-	$keep_alive //= $$hdr =~m{\A.*HTTP/1\.1\r?\n}; 
+	$path !~m{^/} and return $self->fatal("invalid path $path");
+
+	# set/replace host header with target from URL and normalize URL
+	$host =~s{\.\.+}{.}g;
+	my $hp = $host =~m{:} ? "[$host]":$host;
+	$hp .= ":$port" if $default_port{$proto} != $port;
+	$head->{host} = [ $hp ];
+	$url = "$proto://$hp$path";
     }
 
-    $time ||= AnyEvent->now;
-    my $connect_cb = sub {
-	$self->{connected} = 1;
-	#debug("connected to $host.$port");
-	$self->{acct}{ctime} = AnyEvent->now - $time;
-	if ($$hdr ne '') {
-	    _forward($self,0,1,$$hdr);
-	} else {
-	    # successful Upgrade, CONNECT.. - send OK to client
-	    # fake that it came from server so that the state gets
-	    # maintained in Net::Inspect::L7::HTTP
-	    $self->{conn}->in(1,"HTTP/1.0 200 OK\r\n\r\n",0,$time);
-	}
-	$self->{conn}{relay}->mask(1,r=>1);
-	_call_spooled($self, { in_request_body => 1 });
-    };
-    $self->{conn}{relay}->connect(1,$host,$port,$connect_cb,!$keep_alive);
-    return $hdr_changed;
-}
+    $self->{acct}{url} = $url;
+    $self->{acct}{method} = $met;
+    $self->{acct}{reqid} = $self->{meta}{reqid};
 
-sub _call_spooled {
-    my ($self,$filter) = @_;
-    my $spool = $self->{conn}{spool} or return;
-    $self->{conn}{spool} = undef;
-
-    while ( @$spool and ! $self->{conn}{spool} ) {
-	my ($method,@arg) = @{ $spool->[0] };
-	if ( ! $filter or $filter->{$method} ) {
-	    shift(@$spool);
-	    $self->$method(@arg);
-	} else {
-	    last;
-	}
+    if ( $met eq 'CONNECT' and ! $self->{up_proxy} ) {
+	# just skip all the header manipulation and normalization, we don't
+	# need your stinkin header!
+	$hdr = '';
+	goto SRVCON;
     }
 
-    # put unfinished requests back into spool
-    unshift @{ $self->{conn}{spool} }, @$spool if @$spool;
-
-    # enable read on client side again if nothing in spool
-    $self->{conn}{relay}->mask(0,r=>1) if ! $self->{conn}{spool};
-}
-
-
-
-sub _send {
-    my ($self,$to,$data,$type) = @_;
-    my $from = $to ? 0:1;
-    if ( my $filter = $self->{imp_filter} ) {
-	$filter->in($from,$data,$type);
+    # do we want/support persistence?
+    my %conn = map { lc($_) => 1 } grep { m{\b(close|keep-alive)\b}i } (
+	@{ delete $head->{connection} || [] },
+	defined($self->{me_proxy}) 
+	    ? @{ delete $head->{'proxy-connection'} || [] } : ()
+    );
+    if ( keys %conn > 1 ) {
+	# fall back to close
+	$self->{keep_alive} = 0;
+	$head->{connection} = [ 'close' ];
+    } elsif ( $conn{close} ) {
+	$self->{keep_alive} = 0;
+	# default in 1.1 is keep-alive
+	$head->{connection} = [ 'close' ] if $version eq '1.1';
+    } elsif ( $conn{'keep-alive'} ) {
+	$self->{keep_alive} = 1;
+	# default in 1.0 is close
+	$head->{connection} = [ 'keep-alive' ] if $version eq '1.0';
     } else {
-	_forward($self,$from,$to,$data);
+	# use default of version
+	$self->{keep_alive} = $version eq '1.1';
+    }
+
+    # if we are a proxy set a via tag
+    if ( my $via = $self->{me_proxy} ) {
+	push @{$head->{via}}, "$version $via";
+    }
+
+    # normalize header before forwarding it
+    # sort keys, normalize case of keys etc
+    $hdr = "$met ".( $self->{up_proxy} ? $url : $path )." HTTP/$version\r\n";
+    for my $k ( sort keys %$head) {
+	$hdr .= "\u$k: $_\r\n" for @{$head->{$k}};
+    }
+    $hdr .= "\r\n";
+
+    SRVCON:
+
+    if ( my $imp = $self->{imp_analyzer} ) {
+	if ( defined( my $len = $xhdr->{content_length} )) {
+	    # length is given, fix header
+	    $imp->fixup_request_header(\$hdr, content => $len);
+	} else {
+	    $self->{defer_rqhdr} = $hdr;
+	}
+    }
+
+    $relay->connect( 1,
+	@{ $self->{up_proxy} || [ $host,$port ] },
+	sub { _fwd_request_after_connect($self,$hdr) }
+    );
+}
+
+sub _fwd_request_after_connect {
+    my ($self,$hdr) = @_;
+    $self->{connected} = 1;
+
+    if ($hdr eq '') {
+	# no header, e.g we have a CONNECT to a non-proxy
+	# put a fake response into Net::Inspect to keep state
+	$self->{conn}->in(1,"HTTP/1.0 200 Connection established\r\n\r\n");
+	goto next_data;
+    }
+
+    if ( my $imp = $self->{imp_analyzer} ) {
+	if ( $imp->fixup_request_header(\$hdr, defered => 0) ) {
+	    $self->{defer_rqhdr} = '';
+	} else {
+	    # keep deferring sending header, length not known
+	    return;
+	}
+    }
+
+    my $relay = $self->{conn}{relay} or return;
+    $relay->forward(0,1,$hdr);
+
+    next_data:
+    # call spooled request_bodies
+    my $spool = $self->{conn}{spool};
+    while (@$spool) {
+	my ($sub,@arg) = @{ $spool->[0] };
+	last if $sub == \&in_request_header;
+	shift(@$spool);
+	$DEBUG && debug("handle spooled event $sub");
+	$sub->(@arg);
     }
 }
 
-sub _send_and_remove {
-    my ($self,$to,$dataref,$type) = @_;
-    _send($self,$to,$$dataref,$type);
-    $$dataref = '';
+############################################################################
+# process request body data
+# if IMP, we might need to wait for a callback to decide what to do with
+# the data, otherwise the data are further send directly
+# if IMP might modify the data, we need to defer sending the header to get
+# the final content-length and fixup the header accordingly
+############################################################################
+sub in_request_body {
+    my ($self,$data,$eof) = @_;
+    my $conn  = $self->{conn}  or return;
+    my $relay = $conn->{relay} or return;
+    if ( ! $self->{connected} ) {
+	# not connected yet
+	$DEBUG && debug("spool request body data");
+	push @{$conn->{spool}}, [ \&in_request_body, @_ ];
+	return;
+    }
+    
+    $DEBUG && debug("got request body data len=%d eof=%d",length($data),$eof);
+    my $imp = $self->{imp_analyzer};
+    if ( ! $imp ) {
+	# fast path w/o imp
+	$relay->forward(0,1,$data) if $data ne '';
+	return;
+    }
+
+    # feed data into IMP
+    $DEBUG && debug("fwd request body to IMP");
+    $imp->request_body($data,\&_request_body_after_imp,$self) if $data ne '';
+    $imp->request_body('',\&_request_body_after_imp,$self) if $eof;
 }
 
-sub _forward {
-    my ($self,$from,$to,$data) = @_;
-    $self->{acct}{"out$to"} += length($data);
-    $self->{conn}{relay}->forward($from,$to,$data);
+############################################################################
+# process request body data in case of IMP
+# called from IMP callback working on request body data
+############################################################################
+sub _request_body_after_imp {
+    my ($self,$data,$eof) = @_;
+    my $conn  = $self->{conn}  or return;
+    my $relay = $conn->{relay} or return;
+
+    if ( $self->{defer_rqhdr} ne '') {
+	$self->{defer_rqbody} .= $data;
+	if ( not $self->{imp_analyzer}->fixup_request_header( 
+	    \$self->{defer_rqhdr}, 
+	    defered => length($self->{defer_rqbody}) 
+	)) {
+	    # body length still not known
+	    $DEBUG && debug("request body length still unknown");
+	    $self->{defer_rqbody} .= $data;
+	    $eof or return;
+	}
+
+	$DEBUG && debug("forward %d bytes header + %d bytes body",
+	    length($self->{defer_rqhdr}),
+	    length($self->{defer_rqbody}));
+
+	$relay->forward( 0,1,$self->{defer_rqhdr}.$self->{defer_rqbody} );
+	$self->{defer_rqhdr} = $self->{defer_rqbody} = '';
+
+    } else {
+	$DEBUG && debug("forward %d bytes body",length($data));
+	$relay->forward( 0,1,$data );
+    }
+}
+
+############################################################################
+# process response header
+# jumps to _response_header_after_imp, directly or from IMP 
+############################################################################
+sub in_response_header {
+    my ($self,$hdr,$time,$xhdr) = @_;
+
+    if ( my $imp = $self->{imp_analyzer} ) {
+	$imp->response_header($hdr,$xhdr,
+	    \&_response_header_after_imp,$self);
+    } else {
+	_response_header_after_imp($self,$hdr,$xhdr);
+    }
 }
 
 
-# callbacks from App::HTTP_Proxy_IMP::IMP --------------------------
-# called on data to forward: (from,to,data)
-*imp_forward = \&_forward;
+############################################################################
+# process response header, maybe it got manipulated by IMP
+############################################################################
+sub _response_header_after_imp {
+    my ($self,$hdr,$xhdr) = @_;
+    my $relay = $self->{conn}{relay} or return;
 
-# called when processing request header is done
-sub imp_rqhdr {
-    my ($self,$hdr,$changed) = @_;
-    $self->request_header($hdr) if $changed;
-    $self->_inrqhdr_connect_upstream(\$hdr);
+    my $version = $xhdr->{version};
+    my $code    = $self->{acct}{code} = $xhdr->{code};
+    my $clen    = $xhdr->{content_length};
+
+    $DEBUG && debug("input header: $hdr");
+    my $status_line = "HTTP/$version $code $xhdr->{reason}\r\n"; # normalized
+
+    my $head = $xhdr->{fields};
+    #warn Dumper($head); use Data::Dumper;
+    $xhdr->{junk} and $relay->error(
+	"Bad response header lines: $xhdr->{junk}");
+
+    # check if the response is chunked and strip any transfer-encoding header
+    # it will be added, when we know, how we talk to the client
+    if ( $xhdr->{chunked} ) {
+	delete $head->{'transfer-encoding'};
+	# if chunked is given content-length should be ignored
+	# better strip, so that client will parse it correctly
+	delete $head->{'content-length'};
+    }
+
+    # if we don't know the content_length we try chunked, but only if client
+    # and server used version 1.1. Otherwise we will close connection
+    # at request end.
+    # if only client supports chunking we better don't change response header
+    # to 1.1, because in the 1.0 response might contain 1.0 specific headers 
+    # (Pragma...) which we don't know how to translate
+    if ( defined $clen ) {
+	$DEBUG && debug("have content-length $clen");
+    } else {
+	if  ( $version eq '1.1' and $self->{rq_version} eq '1.1' ) {
+	    $head->{'transfer-encoding'} = [ 'chunked' ];
+	    delete $head->{'content-length'};
+	    $DEBUG && debug("no clen known - use chunked encoding");
+	    $self->{rp_encoder} = sub { 
+		my $data = shift;
+		sprintf("%x\r\n%s\r\n", length($data),$data) 
+	    };
+	} else {
+	    # disable persistance, we will end with EOF
+	    $DEBUG && debug("no clen known - use eof to end response");
+	    $self->{keep_alive} = 0;
+	}
+    }
+
+    # set connection header if behavior is not default
+    if ( $version eq '1.1' and ! $self->{keep_alive} ) {
+	$head->{connection} = [ 'close' ];
+    } elsif ( $version eq '1.0' and $self->{keep_alive} ) {
+	$head->{connection} = [ 'keep-alive' ];
+    } else {
+	delete $head->{connection}
+    }
+
+
+    # create normalized header
+    $hdr = $status_line;
+    for my $k ( sort keys %$head) {
+	$hdr .= "\u$k: $_\r\n" for @{$head->{$k}};
+    }
+    $hdr .= "\r\n";
+
+    # forward header
+    $DEBUG && debug("output hdr: $hdr");
+    $relay->forward(1,0,$hdr);
 }
 
-# called on accounting
-sub imp_acct {
-    my ($self,$k,$v) = @_;
-    $self->{acct}{$k} = $v
+
+############################################################################
+# handle response body data
+# will be forwarded to _response_body_after_imp with data or '' (eof)
+# maybe it will forwarded before to IMP analyzer
+############################################################################
+sub in_response_body {
+    my ($self,$data,$eof) = @_;
+
+    if ( my $imp = $self->{imp_analyzer} ) {
+	$data ne '' && $imp->response_body($data,
+	    \&_response_body_after_imp,$self);
+	$eof && $imp->response_body('',
+	    \&_response_body_after_imp,$self); 
+    } else {
+	_response_body_after_imp($self,$data,$eof);
+    }
 }
+
+sub _response_body_after_imp {
+    my ($self,$data,$eof) = @_;
+    my $relay = $self->{conn}{relay} or return;
+
+    # chunking, compression ...
+    if ( my $encode = $self->{rp_encoder} ) {
+	$data = $encode->($data) if $data ne '';
+	$data.= $encode->('') if $eof;
+    }
+    if ( $data ne '' ) {
+	$DEBUG && $relay->xdebug("send ".length($data)." bytes to c");
+	$relay->forward(1,0,$data);
+    } 
+
+    if ($eof) {
+        $relay->account(%{ $self->{meta}}, %{ $self->{acct}});
+	if ( ! $self->{keep_alive} ) {
+	    # close connection
+	    $DEBUG && $relay->xdebug("end of request: close");
+	    return $relay->close;
+	}
+
+	# keep connection open
+	# and continue with next request if we have one
+	$DEBUG && $relay->xdebug("end of request: keep-alive");
+	my $conn = $self->{conn};
+	my $spool = $conn->{spool} or Carp::confess("no spool");
+	$conn->{spool} = undef;
+	@$spool or return; # no next request yet
+
+	while ( ! $conn->{spool} ) {
+	    my ($sub,@arg) = @{ shift @$spool };
+	    $sub->(@arg);
+	}
+	if ( @$spool ) {
+	    unshift @{ $conn->{spool} }, @$spool;
+	}
+    }
+}
+
+############################################################################
+# Websockets, TLS upgrades etc
+# if not IMP the forwarding will be done inside this function, otherwise it
+# will be done in _in_data_imp, which gets called by IMP callback
+############################################################################
+sub in_data {
+    my ($self,$dir,$data,$eof) = @_;
+
+    if ( my $imp = $self->{imp_analyzer} ) {
+	$data ne '' and $imp->data($dir,$data,\&_data_imp,$self);
+	$eof and $imp->data($dir,'',\&_data_imp,$self);
+    } elsif ( $data ne '' ) {
+	my $relay = $self->{conn}{relay} or return;
+	$DEBUG && $relay->xdebug("got %d bytes from %d, eof=%d",length($data),$dir,$eof);
+	$relay->forward($dir,$dir?0:1, $data);
+    }
+}
+
+sub _in_data_imp {
+    my ($self,$dir,$data,$eof) = @_;
+    my $relay = $self->{conn}{relay} or return;
+    $DEBUG && $relay->xdebug("imp got %d bytes from %d, eof=%d",length($data),$dir,$eof);
+    $relay->forward($dir,$dir?0:1, $data) if $data ne '';
+}
+
+############################################################################
+# chunks and junk gets ignored
+# - we decide ourself, when we will forward data chunked and do the
+#   chunking ourself
+# - junk data will not be forwarded
+############################################################################
+
+sub in_chunk_header {}
+sub in_chunk_trailer {}
+sub in_junk {}
+
 
 1;
 

@@ -1,3 +1,8 @@
+0.94 2013-02-07
+- major rewrite of Request.pm and IMP.pm:
+  - don't use InspectChain any longer in Request,
+  - decode content only if inspection of content is required
+  - defer sending request header as long as content-length is not known
 0.931 2013-01-23
 - stability improvements on connection errors
 - improvements to FakeResponse for URIs ending with '/'
