@@ -119,6 +119,7 @@ sub new_analyzer {
 	stalled => [0,0],   # too much data in ibuf?
 	eof => [0,0],       # got eof in dir ?
 	decode => undef,    # decoder for content-encoding decode{type}[dir]
+	pass_encoded => undef, # pass body encoded (analyzer will not change body)
 	method => undef,    # request method
     }, ref($factory);
     lock_ref_keys($self);
@@ -219,6 +220,14 @@ sub _request_header_imp {
 	    \r?\n\Z
 	}isx;
 
+	# internal URL are not accepted by the client itself, only from
+	# plugin. Set xhdr.internal_url if we see, that IMP plugin rewrote
+	# url to internal one and strip internal:// again so that original
+	# URL could be logged
+	my $internal = $met ne 'CONNECT'
+	    && $xhdr->{url} !~m{^internal://}i
+	    && $url =~s{^internal://}{}i;
+
 	my %kv;
 	my $bad = _parse_hdrfields($fields,\%kv);
 	$xhdr = {
@@ -227,6 +236,7 @@ sub _request_header_imp {
 	    url => $url,
 	    fields => \%kv,
 	    $bad ? ( junk => $bad ) :(),
+	    $internal ? ( internal_url => 1 ):(),
 	};
     }
 
@@ -401,6 +411,11 @@ sub _response_header_imp {
 
     if ( $self->{decode}{IMP_DATA_HTTPRQ_CONTENT+0}[1] ) {
 	if ( $nochange ) {
+	    # we will pass encoded stuff, either no decoding needs to
+	    # be done (pass) or we will decode only for the analyzer (prepass)
+	    # which will only watch at the content, but not change it
+	    $self->{pass_encoded}[1] = 1;
+
 	    my $pass = $self->{pass}[1];
 	    if ( $pass and defined $orig_clen and ( 
 		$pass == IMP_MAXOFFSET or 
@@ -731,6 +746,7 @@ sub _imp_data {
     my $ibuf = $self->{ibuf}[$dir];
     my $eobuf = $ibuf->[-1][0] + length($ibuf->[-1][1]);
 
+    my $encoded_data;
     if ( my $decode = $self->{decode}{$type+0}[$dir] ) {
 	# set up decoder if not set up yet
 	if ( ! ref($decode)) {
@@ -745,6 +761,7 @@ sub _imp_data {
 	# which is not allowed, when decoding a stream.
 	die "cannot use content decoder with gap in data" if $offset;
 
+	$encoded_data = $data if $self->{pass_encoded}[$dir];
 	defined( $data = $decode->($data) )
 	    or return $self->{request}->fatal("decoding content failed");
     }
@@ -767,7 +784,7 @@ sub _imp_data {
 	    # pass thru w/o analyzing
 	    $ibuf->[0][0] += $dlen;
 	    $DEBUG && debug("can pass($dir) infinite");
-	    return $callback->($self,$data,0,$args);
+	    return $callback->($self,$encoded_data // $data,0,$args);
 	}
 
 	my $canpass = $pass - ( $offset||$eobuf );
@@ -785,10 +802,11 @@ sub _imp_data {
 	    }
 	    $DEBUG && debug(
 		"can pass($dir) all: pass($canpass)>=data.len($dlen)");
-	    return $callback->($self,$data,0,$args);
+	    return $callback->($self,$encoded_data // $data,0,$args);
 	} elsif ( $type < 0 ) {
 	    # can pass part of data, only for streaming types
 	    # remove from data what can be passed 
+	    die "body might change" if $self->{pass_encoded}[$dir];
 	    $ibuf->[0][0] += $canpass;
 	    my $passed_data = substr($data,0,$canpass,'');
 	    $eobuf += $canpass;
@@ -810,7 +828,7 @@ sub _imp_data {
 	    # prepass everything
 	    $ibuf->[0][0] += $dlen;
 	    $DEBUG && debug("can prepass($dir) infinite");
-	    $callback->($self,$data,0,$args); # callback but continue
+	    $callback->($self,$encoded_data // $data,0,$args); # callback but continue
 	    goto SEND2IMP;
 	}
 
@@ -821,13 +839,14 @@ sub _imp_data {
 	} elsif ( $canprepass >= $dlen) {
 	    # can prepass everything
 	    $ibuf->[0][0] += $dlen;
-	    $callback->($self,$data,0,$args); # callback but continue
+	    $callback->($self,$encoded_data // $data,0,$args); # callback but continue
 	    $DEBUG && debug(
 		"can prepass($dir) all: pass($canprepass)>=data.len($dlen)");
 	    goto SEND2IMP;
 	} elsif ( $type < 0 ) {
 	    # can prepass part of data, only for streaming types
 	    # remove from data what can be prepassed
+	    die "body might change" if $self->{pass_encoded}[$dir];
 	    $ibuf->[0][0] += $canprepass;
 	    my $passed_data = substr($data,0,$canprepass,'');
 	    $eobuf += $canprepass;

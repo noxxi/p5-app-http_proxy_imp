@@ -1,3 +1,10 @@
+0.941 2013-02-08
+- restored functionality, that plugin might rewrite URL to 
+  internal://orig_url and than create the response itself
+- fix content decoding (gzip..) if it is upfront known, that
+  the body will not change. In this case the client will get
+  the origiganl encoded content, but the analyzer gets the
+  decoded content
 0.94 2013-02-07
 - major rewrite of Request.pm and IMP.pm:
   - don't use InspectChain any longer in Request,

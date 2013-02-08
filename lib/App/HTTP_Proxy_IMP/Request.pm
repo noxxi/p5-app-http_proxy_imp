@@ -14,7 +14,7 @@ use fields (
     'me_proxy',     # defined if I'm proxy, if true will be used for Via:
     'up_proxy',     # address of upstream proxy if any
     'acct',         # some accounting data
-    'connected',    # if connected to server
+    'connected',    # false|CONN_HOST|CONN_INTERNAL
 
     'imp_analyzer', # App::HTTP_Proxy_IMP::IMP object
     'defer_rqhdr',  # deferred request header (wait until body length known)
@@ -35,6 +35,10 @@ use Net::IMP::HTTP; # constants
 use Sys::Hostname 'hostname';
 
 my $HOSTNAME = hostname();
+
+# connected to host or do we fake the response internally
+use constant CONN_HOST => 1;
+use constant CONN_INTERNAL => 2;
 
 sub DESTROY { $DEBUG && debug("destroy request"); }
 sub new_request {
@@ -179,12 +183,9 @@ sub _request_header_after_imp {
 	    $proto = 'http';
 	    $path = $url;
 	    if ( my $h = $head->{host} ) {
-		if (@$h>1) {
-		    $relay->RLog( 'BAD_HEADER_WARNING', {
-			msg => "Ignoring multiple host headers"});
-		}
-		$h->[0] =~m{^(?:\[([\w\-.:]+)\]|([\w\-.]+))(?::(\d+))$} or 
-		    return $self->fatal("bad host line '$_'");
+		$relay->error("Ignoring multiple host headers") if @$h>1;
+		$h->[0] =~m{^(?:\[([\w\-.:]+)\]|([\w\-.]+))(?::(\d+))?$} or 
+		    return $self->fatal("bad host line '$h->[0]'");
 		$host = $1||$2;
 		$port = $3;
 	    } else {
@@ -196,7 +197,7 @@ sub _request_header_after_imp {
 	return $self->fatal("invalid port $port") 
 	    if ! $port or $port > 2**16-1;
 
-	$path !~m{^/} and return $self->fatal("invalid path $path");
+	$path !~m{^/} and return $self->fatal("invalid path $path ($url)");
 
 	# set/replace host header with target from URL and normalize URL
 	$host =~s{\.\.+}{.}g;
@@ -255,6 +256,31 @@ sub _request_header_after_imp {
 
     SRVCON:
 
+    if ( $xhdr->{internal_url} ) {
+	# the IMP plugin rewrote the url to internal://smthg,
+	# meaning, that the plugin will provide us with the real response
+	$self->{acct}{internal} = 1;
+	$self->{connected} = CONN_INTERNAL;
+	$self->{keep_alive} = 0;
+
+	# accept more body data
+	_call_spooled($conn,\&in_request_header);
+	$relay->mask(0,r=>1);
+
+	# inject minimal response into Net::Inspect, which than can modify
+	# it at will
+	# IMP let us not change nothing (e.g. empty body) into something, so
+	# we need to provide minimal content where content is expected
+	$conn->in(1, 
+	    $met eq 'HEAD' 
+		? "HTTP/$version 200 Ok\r\n\r\n" 
+		: "HTTP/$version 200 Ok\r\nContent-length: 1\r\n\r\n%",
+	    1, # eof
+	    0, # time
+	);
+	return;
+    }
+
     if ( my $imp = $self->{imp_analyzer} ) {
 	if ( defined( my $len = $xhdr->{content_length} )) {
 	    # length is given, fix header
@@ -272,13 +298,13 @@ sub _request_header_after_imp {
 
 sub _fwd_request_after_connect {
     my ($self,$hdr) = @_;
-    $self->{connected} = 1;
+    $self->{connected} = CONN_HOST;
 
     if ($hdr eq '') {
 	# no header, e.g we have a CONNECT to a non-proxy
 	# put a fake response into Net::Inspect to keep state
 	$self->{conn}->in(1,"HTTP/1.0 200 Connection established\r\n\r\n");
-	goto next_data;
+	return _call_spooled($self->{conn}, \&in_request_header );
     }
 
     if ( my $imp = $self->{imp_analyzer} ) {
@@ -291,18 +317,23 @@ sub _fwd_request_after_connect {
     }
 
     my $relay = $self->{conn}{relay} or return;
-    $relay->forward(0,1,$hdr);
+    $relay->forward(0,1,$hdr) if $self->{connected} == CONN_HOST;
+}
 
-    next_data:
+sub _call_spooled {
+    my ($conn,$upto) = @_;
+
     # call spooled request_bodies
-    my $spool = $self->{conn}{spool};
-    while (@$spool) {
+    my $spool = $conn->{spool} or return;
+    $conn->{spool} = undef;
+    while (@$spool && ! $conn->{spool} ) {
 	my ($sub,@arg) = @{ $spool->[0] };
-	last if $sub == \&in_request_header;
+	last if $upto && $sub == $upto;
 	shift(@$spool);
 	$DEBUG && debug("handle spooled event $sub");
 	$sub->(@arg);
     }
+    push @{ $conn->{spool}}, @$spool if @$spool; # put back
 }
 
 ############################################################################
@@ -327,7 +358,8 @@ sub in_request_body {
     my $imp = $self->{imp_analyzer};
     if ( ! $imp ) {
 	# fast path w/o imp
-	$relay->forward(0,1,$data) if $data ne '';
+	$relay->forward(0,1,$data) if $data ne '' 
+	    and $self->{connected} == CONN_HOST;
 	return;
     }
 
@@ -362,12 +394,13 @@ sub _request_body_after_imp {
 	    length($self->{defer_rqhdr}),
 	    length($self->{defer_rqbody}));
 
-	$relay->forward( 0,1,$self->{defer_rqhdr}.$self->{defer_rqbody} );
+	$relay->forward(0,1,$self->{defer_rqhdr}.$self->{defer_rqbody} )
+	    if $self->{connected} == CONN_HOST;
 	$self->{defer_rqhdr} = $self->{defer_rqbody} = '';
 
     } else {
 	$DEBUG && debug("forward %d bytes body",length($data));
-	$relay->forward( 0,1,$data );
+	$relay->forward( 0,1,$data ) if $self->{connected} == CONN_HOST;
     }
 }
 
@@ -505,18 +538,7 @@ sub _response_body_after_imp {
 	# keep connection open
 	# and continue with next request if we have one
 	$DEBUG && $relay->xdebug("end of request: keep-alive");
-	my $conn = $self->{conn};
-	my $spool = $conn->{spool} or Carp::confess("no spool");
-	$conn->{spool} = undef;
-	@$spool or return; # no next request yet
-
-	while ( ! $conn->{spool} ) {
-	    my ($sub,@arg) = @{ shift @$spool };
-	    $sub->(@arg);
-	}
-	if ( @$spool ) {
-	    unshift @{ $conn->{spool} }, @$spool;
-	}
+	_call_spooled( $self->{conn} );
     }
 }
 
@@ -534,15 +556,26 @@ sub in_data {
     } elsif ( $data ne '' ) {
 	my $relay = $self->{conn}{relay} or return;
 	$DEBUG && $relay->xdebug("got %d bytes from %d, eof=%d",length($data),$dir,$eof);
-	$relay->forward($dir,$dir?0:1, $data);
+	if ( $data ne '' ) {
+	    if ( $dir == 1 ) {
+		$relay->forward(1,0,$data)
+	    } else {
+		$relay->forward(0,1,$data) if $self->{connected} == CONN_HOST;
+	    }
+	}
     }
 }
-
 sub _in_data_imp {
     my ($self,$dir,$data,$eof) = @_;
     my $relay = $self->{conn}{relay} or return;
     $DEBUG && $relay->xdebug("imp got %d bytes from %d, eof=%d",length($data),$dir,$eof);
-    $relay->forward($dir,$dir?0:1, $data) if $data ne '';
+    if ( $data ne '' ) {
+	if ( $dir == 1 ) {
+	    $relay->forward(1,0,$data)
+	} else {
+	    $relay->forward(0,1,$data) if $self->{connected} == CONN_HOST;
+	}
+    }
 }
 
 ############################################################################

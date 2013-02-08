@@ -13,11 +13,24 @@ sub RTYPES { ( IMP_PASS,IMP_REPLACE,IMP_DENY,IMP_ACCTFIELD ) }
 
 sub new_factory {
     my ($class,%args) = @_;
-    my $dir = $args{root} or croak("no root directory given");
+    my $dir = delete $args{root} or croak("no root directory given");
     -d $dir && -r _ && -x _ or croak("cannot use base dir $dir: $!");
-    return $class->SUPER::new_factory(%args);
+    my $obj = $class->SUPER::new_factory(%args);
+    $obj->{root} = $dir;
+    return $obj;
 }
 
+sub validate_cfg {
+    my ($class,%args) = @_;
+    my $dir = delete $args{root};
+    my @err = $class->SUPER::validate_cfg(%args);
+    if ( ! $dir ) {
+	push @err, "no 'root' given";
+    } elsif ( ! -d $dir || ! -r _ || ! -x _ ) {
+	push @err, "cannot access root dir $dir";
+    }
+    return @err;
+}
 
 sub request_hdr {
     my ($self,$hdr) = @_;
@@ -56,7 +69,7 @@ sub request_hdr {
 
     $self->{response} = do { local $/; <$fh>; };
 	
-    $hdr =~s{(\A\w+\s+)(\S+)}{$1internal://imp};
+    $hdr =~s{(\A\w+\s+)}{$1internal://};
     debug("hijack http://$host:$port$page");
     $self->run_callback(
 	[ IMP_ACCTFIELD,'orig_uri',"http://$host:$port$page" ],
@@ -78,13 +91,13 @@ sub response_hdr {
 sub response_body {
     my ($self,$data) = @_;
     $self->{ignore} and return;
-    if ( $self->{response} eq '' ) {
-	$self->run_callback([ IMP_REPLACE,1,$self->offset(1),'' ])
-	    if $data ne '';
-    } else {
+    if ( $data ne '' ) {
 	debug("replace data up to offset=%d", $self->offset(1) );
-	$self->run_callback([ IMP_REPLACE,1,$self->offset(1),$self->{response} ]);
-	$self->{response} = '';
+	$self->run_callback(
+	    [ IMP_REPLACE,1,$self->offset(1),$self->{response} ],
+	    [ IMP_PASS,1,IMP_MAXOFFSET ],
+	);
+	$self->{ignore} = 1;
     }
 }
 
