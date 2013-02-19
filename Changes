@@ -1,3 +1,8 @@
+0.942 2013-02-21
+- better debugging 
+- accept replacements of empty buffers
+- stability improvements
+- make IMP_MAX_IN_ANALYZER configurable
 0.941 2013-02-08
 - restored functionality, that plugin might rewrite URL to 
   internal://orig_url and than create the response itself

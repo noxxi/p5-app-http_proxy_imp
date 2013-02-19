@@ -5,8 +5,8 @@ WriteMakefile(
     VERSION_FROM => 'lib/App/HTTP_Proxy_IMP.pm',
     PREREQ_PM => {
 	'Net::Inspect' => 0.27,
-	'Net::IMP' => 0.57,
-	'Net::IMP::HTTP' => 0.2,
+	'Net::IMP' => 0.60,
+	'Net::IMP::HTTP' => 0.51,
 	'AnyEvent' => 6.12,
     },
     EXE_FILES => [ 'bin/http_proxy_imp' ],

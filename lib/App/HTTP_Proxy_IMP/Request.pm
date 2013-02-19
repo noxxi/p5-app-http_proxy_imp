@@ -27,7 +27,7 @@ use fields (
 
 );
 
-use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG);
+use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG debug_context);
 use Scalar::Util 'weaken';
 use Net::Inspect::Debug 'trace';
 use Net::IMP qw(:DEFAULT :log);
@@ -43,7 +43,7 @@ use constant CONN_INTERNAL => 2;
 sub DESTROY { $DEBUG && debug("destroy request"); }
 sub new_request {
     my ($factory,$meta,$conn) = @_;
-    $DEBUG && debug("new request");
+    $DEBUG && $conn->xdebug("new request");
     my $self = $factory->new;
 
     $self->{meta} = $meta;
@@ -64,14 +64,14 @@ sub new_request {
 
 sub xdebug {
     my $self = shift;
-    my $relay = $self->{conn}{relay} or return;
-    $relay->xdebug(@_);
+    my $ctx = debug_context( id => $self->id );
+    goto &debug;
 }
 
 sub id {
     my $self = shift;
     $self->{conn} or return '';
-    return $self->{conn}{connid}.'.'.$self->{meta}{reqid}
+    return $$.'.'.$self->{conn}{connid}.'.'.$self->{meta}{reqid}
 }
 
 sub fatal {
@@ -107,7 +107,7 @@ sub in_request_header {
     my $conn = $self->{conn} or return;
     if ( $conn->{spool} ) {
 	# we have an active request, spool this new one (pipelining)
-	$DEBUG && debug("spool new request");
+	$DEBUG && $self->xdebug("spool new request");
 	push @{$conn->{spool}}, [ \&in_request_header, @_ ];
 	return;
     }
@@ -115,13 +115,14 @@ sub in_request_header {
     $conn->{spool} = []; # mark connection as processing request
 
     my $relay = $conn->{relay} or return;
-    $DEBUG && debug("incoming request header ".$hdr);
+    $DEBUG && $self->xdebug("incoming request header ".$hdr);
 
     $self->{method} = $xhdr->{method};
     $self->{rq_version} = $xhdr->{version};
 
     if ( my $imp = $self->{imp_analyzer} ) {
 	# pass thru IMP
+	my $debug = $DEBUG && debug_context( id => $self->id);
 	$imp->request_header($hdr,$xhdr,
 	    \&_request_header_after_imp,$self);
     } else {
@@ -264,7 +265,7 @@ sub _request_header_after_imp {
 	$self->{keep_alive} = 0;
 
 	# accept more body data
-	_call_spooled($conn,\&in_request_header);
+	_call_spooled_this($conn);
 	$relay->mask(0,r=>1);
 
 	# inject minimal response into Net::Inspect, which than can modify
@@ -284,6 +285,7 @@ sub _request_header_after_imp {
     if ( my $imp = $self->{imp_analyzer} ) {
 	if ( defined( my $len = $xhdr->{content_length} )) {
 	    # length is given, fix header
+	    my $debug = $DEBUG && debug_context( id => $self->id);
 	    $imp->fixup_request_header(\$hdr, content => $len);
 	} else {
 	    $self->{defer_rqhdr} = $hdr;
@@ -304,32 +306,57 @@ sub _fwd_request_after_connect {
 	# no header, e.g we have a CONNECT to a non-proxy
 	# put a fake response into Net::Inspect to keep state
 	$self->{conn}->in(1,"HTTP/1.0 200 Connection established\r\n\r\n");
-	return _call_spooled($self->{conn}, \&in_request_header );
+	return _call_spooled_this($self->{conn});
     }
 
     if ( my $imp = $self->{imp_analyzer} ) {
+	my $debug = $DEBUG && debug_context( id => $self->id);
 	if ( $imp->fixup_request_header(\$hdr, defered => 0) ) {
 	    $self->{defer_rqhdr} = '';
 	} else {
 	    # keep deferring sending header, length not known
+	    _call_spooled_this($self->{conn}); # any body already ?
 	    return;
 	}
     }
 
     my $relay = $self->{conn}{relay} or return;
     $relay->forward(0,1,$hdr) if $self->{connected} == CONN_HOST;
+    _call_spooled_this($self->{conn}); # any body already ?
 }
 
-sub _call_spooled {
-    my ($conn,$upto) = @_;
+sub _call_spooled_this {
+    my $conn = shift;
 
-    # call spooled request_bodies
+    # call spooled request_bodies, e.g. until we see a new request
+    debug("check for spooled subs in this request");
     my $spool = $conn->{spool} or return;
     $conn->{spool} = undef;
     while (@$spool && ! $conn->{spool} ) {
 	my ($sub,@arg) = @{ $spool->[0] };
-	last if $upto && $sub == $upto;
+	last if $sub == \&in_request_header;
 	shift(@$spool);
+	$DEBUG && debug("handle spooled event $sub");
+	$sub->(@arg);
+    }
+    push @{ $conn->{spool}}, @$spool if @$spool; # put back
+}
+
+sub _call_spooled_next {
+    my $conn = shift;
+
+    # skip until we have a next request, then continue
+    debug("check for spooled requests, ignoring subs for this");
+    my $spool = $conn->{spool} or return;
+    $conn->{spool} = undef;
+    while (@$spool) {
+	my ($sub,@arg) = @{ $spool->[0] };
+	last if $sub == \&in_request_header;
+	$DEBUG && debug("skip spooled event $sub");
+	shift(@$spool);
+    }
+    while (@$spool && ! $conn->{spool} ) {
+	my ($sub,@arg) = @{ $spool->[0] };
 	$DEBUG && debug("handle spooled event $sub");
 	$sub->(@arg);
     }
@@ -349,12 +376,12 @@ sub in_request_body {
     my $relay = $conn->{relay} or return;
     if ( ! $self->{connected} ) {
 	# not connected yet
-	$DEBUG && debug("spool request body data");
+	$DEBUG && $self->xdebug("spool request body data");
 	push @{$conn->{spool}}, [ \&in_request_body, @_ ];
 	return;
     }
     
-    $DEBUG && debug("got request body data len=%d eof=%d",length($data),$eof);
+    $DEBUG && $self->xdebug("got request body data len=%d eof=%d",length($data),$eof);
     my $imp = $self->{imp_analyzer};
     if ( ! $imp ) {
 	# fast path w/o imp
@@ -364,7 +391,8 @@ sub in_request_body {
     }
 
     # feed data into IMP
-    $DEBUG && debug("fwd request body to IMP");
+    $DEBUG && $self->xdebug("fwd request body to IMP");
+    my $debug = $DEBUG && debug_context( id => $self->id);
     $imp->request_body($data,\&_request_body_after_imp,$self) if $data ne '';
     $imp->request_body('',\&_request_body_after_imp,$self) if $eof;
 }
@@ -377,6 +405,8 @@ sub _request_body_after_imp {
     my ($self,$data,$eof) = @_;
     my $conn  = $self->{conn}  or return;
     my $relay = $conn->{relay} or return;
+
+    my $debug = $DEBUG && debug_context( id => $self->id);
 
     if ( $self->{defer_rqhdr} ne '') {
 	$self->{defer_rqbody} .= $data;
@@ -412,6 +442,7 @@ sub in_response_header {
     my ($self,$hdr,$time,$xhdr) = @_;
 
     if ( my $imp = $self->{imp_analyzer} ) {
+	my $debug = $DEBUG && debug_context( id => $self->id);
 	$imp->response_header($hdr,$xhdr,
 	    \&_response_header_after_imp,$self);
     } else {
@@ -431,7 +462,7 @@ sub _response_header_after_imp {
     my $code    = $self->{acct}{code} = $xhdr->{code};
     my $clen    = $xhdr->{content_length};
 
-    $DEBUG && debug("input header: $hdr");
+    $DEBUG && $self->xdebug("input header: $hdr");
     my $status_line = "HTTP/$version $code $xhdr->{reason}\r\n"; # normalized
 
     my $head = $xhdr->{fields};
@@ -455,19 +486,19 @@ sub _response_header_after_imp {
     # to 1.1, because in the 1.0 response might contain 1.0 specific headers 
     # (Pragma...) which we don't know how to translate
     if ( defined $clen ) {
-	$DEBUG && debug("have content-length $clen");
+	$DEBUG && $self->xdebug("have content-length $clen");
     } else {
 	if  ( $version eq '1.1' and $self->{rq_version} eq '1.1' ) {
 	    $head->{'transfer-encoding'} = [ 'chunked' ];
 	    delete $head->{'content-length'};
-	    $DEBUG && debug("no clen known - use chunked encoding");
+	    $DEBUG && $self->xdebug("no clen known - use chunked encoding");
 	    $self->{rp_encoder} = sub { 
 		my $data = shift;
 		sprintf("%x\r\n%s\r\n", length($data),$data) 
 	    };
 	} else {
 	    # disable persistance, we will end with EOF
-	    $DEBUG && debug("no clen known - use eof to end response");
+	    $DEBUG && $self->xdebug("no clen known - use eof to end response");
 	    $self->{keep_alive} = 0;
 	}
     }
@@ -490,7 +521,7 @@ sub _response_header_after_imp {
     $hdr .= "\r\n";
 
     # forward header
-    $DEBUG && debug("output hdr: $hdr");
+    $DEBUG && $self->xdebug("output hdr: $hdr");
     $relay->forward(1,0,$hdr);
 }
 
@@ -503,7 +534,9 @@ sub _response_header_after_imp {
 sub in_response_body {
     my ($self,$data,$eof) = @_;
 
+    $self->xdebug("len=".length($data)." eof=$eof");
     if ( my $imp = $self->{imp_analyzer} ) {
+	my $debug = $DEBUG && debug_context( id => $self->id);
 	$data ne '' && $imp->response_body($data,
 	    \&_response_body_after_imp,$self);
 	$eof && $imp->response_body('',
@@ -515,6 +548,7 @@ sub in_response_body {
 
 sub _response_body_after_imp {
     my ($self,$data,$eof) = @_;
+    $self->xdebug("len=".length($data)." eof=$eof");
     my $relay = $self->{conn}{relay} or return;
 
     # chunking, compression ...
@@ -523,7 +557,7 @@ sub _response_body_after_imp {
 	$data.= $encode->('') if $eof;
     }
     if ( $data ne '' ) {
-	$DEBUG && $relay->xdebug("send ".length($data)." bytes to c");
+	$DEBUG && $self->xdebug("send ".length($data)." bytes to c");
 	$relay->forward(1,0,$data);
     } 
 
@@ -531,14 +565,14 @@ sub _response_body_after_imp {
         $relay->account(%{ $self->{meta}}, %{ $self->{acct}});
 	if ( ! $self->{keep_alive} ) {
 	    # close connection
-	    $DEBUG && $relay->xdebug("end of request: close");
+	    $DEBUG && $self->xdebug("end of request: close");
 	    return $relay->close;
 	}
 
 	# keep connection open
 	# and continue with next request if we have one
-	$DEBUG && $relay->xdebug("end of request: keep-alive");
-	_call_spooled( $self->{conn} );
+	$DEBUG && $self->xdebug("end of request: keep-alive");
+	_call_spooled_next( $self->{conn} );
     }
 }
 
@@ -551,11 +585,12 @@ sub in_data {
     my ($self,$dir,$data,$eof) = @_;
 
     if ( my $imp = $self->{imp_analyzer} ) {
-	$data ne '' and $imp->data($dir,$data,\&_data_imp,$self);
-	$eof and $imp->data($dir,'',\&_data_imp,$self);
+	my $debug = $DEBUG && debug_context( id => $self->id);
+	$data ne '' and $imp->data($dir,$data,\&_in_data_imp,$self);
+	$eof and $imp->data($dir,'',\&_in_data_imp,$self);
     } elsif ( $data ne '' ) {
 	my $relay = $self->{conn}{relay} or return;
-	$DEBUG && $relay->xdebug("got %d bytes from %d, eof=%d",length($data),$dir,$eof);
+	$DEBUG && $self->xdebug("got %d bytes from %d, eof=%d",length($data),$dir,$eof);
 	if ( $data ne '' ) {
 	    if ( $dir == 1 ) {
 		$relay->forward(1,0,$data)
@@ -568,7 +603,7 @@ sub in_data {
 sub _in_data_imp {
     my ($self,$dir,$data,$eof) = @_;
     my $relay = $self->{conn}{relay} or return;
-    $DEBUG && $relay->xdebug("imp got %d bytes from %d, eof=%d",length($data),$dir,$eof);
+    $DEBUG && $self->xdebug("imp got %d bytes from %d, eof=%d",length($data),$dir,$eof);
     if ( $data ne '' ) {
 	if ( $dir == 1 ) {
 	    $relay->forward(1,0,$data)

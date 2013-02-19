@@ -12,6 +12,13 @@ use Hash::Util 'lock_ref_keys';
 use Compress::Raw::Zlib;
 use Carp;
 
+use base 'Exporter';
+our @EXPORT_OK = qw($IMP_MAX_IN_ANALYZER);
+
+# if more than IMP_MAX_IN_ANALYZER are in the ibuf we will stop receiving
+# data and wait until callbacks decrease size of ibuf again
+our $IMP_MAX_IN_ANALYZER = 2**20;
+
 my %METHODS_RFC2616 = map { ($_,1) } qw( GET HEAD POST PUT DELETE OPTIONS CONNECT TRACE );
 my %METHODS_WITHOUT_RQBODY = map { ($_,1) } qw( GET HEAD DELETE CONNECT );
 my %METHODS_WITH_RQBODY = map { ($_,1) } qw( POST PUT );
@@ -185,7 +192,7 @@ sub request_header {
 		    + $args{defered};                   # defered_body.length
 	    }
 
-	    $DEBUG && debug("fixup header with clen=%d",$size);
+	    $DEBUG && $self->{request}->xdebug("fixup header with clen=%d",$size);
 	    # replace or add content-length header
 	    $$hdr =~s{^(Content-length:[ \t]*)(\d+)}{$1$size}mi
 		|| $$hdr =~s{(\n)}{$1Content-length: $size\r\n};
@@ -279,8 +286,7 @@ sub request_body {
 sub _request_body_imp {
     my ($self,$data,$changed,$args) = @_;
     my ($callback,@cb_args) = @$args;
-    my $eof = $self->{eof}[0] &&          # got eof from client
-	! defined $self->{ibuf}[0][0][2]; # no more data in ibuf[client]
+    my $eof = _check_eof($self,0);
     $callback->(@cb_args,$data,$eof) if $data ne '' || $eof;
 }
 
@@ -432,8 +438,7 @@ sub _response_header_imp {
 	    delete $xhdr->{fields}{'content-encoding'}
 	}
     }
-
-    if ( defined $clen ) {
+if ( defined $clen ) {
 	$xhdr->{fields}{'content-length'} = [ $clen ];
 	$xhdr->{content_length} = $clen;
     }
@@ -446,8 +451,6 @@ sub _response_header_imp {
 
 ############################################################################
 # handle response body data
-# will be forwarded to _response_body_after_imp with data or '' (eof)
-# maybe it will forwarded before to IMP analyzer
 ############################################################################
 sub response_body {
     my ($self,$data,@callback) = @_;
@@ -461,10 +464,35 @@ sub response_body {
 sub _response_body_imp {
     my ($self,$data,$changed,$args) = @_;
     my ($callback,@cb_args) = @$args;
-    my $eof = $self->{eof}[1] &&          # got eof from server
-	! defined $self->{ibuf}[1][0][2]; # no more data in ibuf[server]
+    my $eof = _check_eof($self,1);
     $callback->(@cb_args,$data,$eof) if $data ne '' || $eof;
 }
+
+
+sub _check_eof {
+    my ($self,$dir) = @_;
+    $DEBUG && $self->{request}->xdebug(
+	"check eof[%d]  - eof=%d - %s - (pre)pass=%d/%d",
+	$dir,$self->{eof}[$dir], _show_buf($self,$dir),
+	$self->{prepass}[$dir],
+	$self->{pass}[$dir]
+    );
+    return $self->{eof}[$dir]                    # received eof
+	&& ! defined $self->{ibuf}[$dir][0][2]   # no more data in buf
+	&& (                                     # (pre)pass til end ok
+	    $self->{prepass}[$dir] == IMP_MAXOFFSET
+	    || $self->{pass}[$dir] == IMP_MAXOFFSET
+	);
+}
+
+sub _show_buf {
+    my ($self,$dir) = @_;
+    return join('|',
+	map { ($_->[2]||'none')."($_->[0],+".length($_->[1]).")" } 
+	@{ $self->{ibuf}[$dir] }
+    );
+}
+
 
 
 ############################################################################
@@ -509,14 +537,14 @@ sub _imp_callback {
         # deny further data 
         if ( $rtype == IMP_DENY ) {
             my ($impdir,$msg) = @$rv;
-	    $DEBUG && debug("got deny($impdir) $msg");
+	    $DEBUG && $request->xdebug("got deny($impdir) $msg");
             return $request->fatal($msg // 'closed by imp');
 	}
 
         # log some data
         if ( $rtype == IMP_LOG ) {
             my ($impdir,$offset,$len,$level,$msg) = @$rv;
-	    $DEBUG && debug("got log($impdir,$level) $msg");
+	    $DEBUG && $request->xdebug("got log($impdir,$level) $msg");
             my %args = ( msg => $msg );
             $args{offset} = $offset if defined $offset;
             $args{len} = $len if defined $len;
@@ -528,7 +556,7 @@ sub _imp_callback {
         # set accounting field
         if ( $rtype == IMP_ACCTFIELD ) {
             my ($key,$value) = @$rv;
-	    $DEBUG && debug("got acct $key => $value");
+	    $DEBUG && $request->xdebug("got acct $key => $value");
             $request->{acct}{$key} = $value;
 	    next;
 	}
@@ -536,7 +564,7 @@ sub _imp_callback {
         # (pre)pass data up to offset
         if ( $rtype ~~ [ IMP_PASS, IMP_PREPASS ]) {
 	    my ($dir,$offset) = @$rv;
-	    $DEBUG && debug("got $rtype($dir) off=$offset");
+	    $DEBUG && $request->xdebug("got $rtype($dir) off=$offset "._show_buf($self,$dir));
 
 	    if ( $rtype == IMP_PASS ) {
 		# ignore pass if it's not better than a previous pass
@@ -634,7 +662,7 @@ sub _imp_callback {
         # replace data up to offset
         if ( $rtype ==  IMP_REPLACE ) {
 	    my ($dir,$offset,$newdata) = @$rv;
-	    $DEBUG && debug("got replace($dir) off=$offset data.len=".
+	    $DEBUG && $request->xdebug("got replace($dir) off=$offset data.len=".
 		length($newdata));
 	    my $ibuf = $self->{ibuf}[$dir];
 	    @$ibuf or die "no ibuf";
@@ -656,7 +684,7 @@ sub _imp_callback {
 	    my $len0 = length($ib0->[1]);
 
 	    # some sanity checks
-	    if ( $rlen <= 0 ) {
+	    if ( $rlen < 0 ) {
 		return $request->fatal("cannot replace already passed data");
 	    } elsif ( $rlen > $len0 ) {
 		return $request->fatal(
@@ -669,7 +697,7 @@ sub _imp_callback {
 		    if $ib0->[2]>0;
 
 		# keep rest and update position
-		substr( $ib0->[1],0,$rlen,'' );
+		substr( $ib0->[1],0,$rlen,'' ) if $rlen;
 		$ib0->[0] += $rlen;
 	    } else {
 		# remove complete buffer
@@ -693,7 +721,7 @@ sub _imp_callback {
     %fwd or return; # no passes/replacements...
 
     while ( my ($dir,$fwd) = each %fwd ) {
-	for my $fw (@$fwd) {
+	while ( my $fw = shift(@$fwd)) {
 	    #warn Dumper($fw); use Data::Dumper;
 	    my ($changed,$data,$callback,$args) = @$fw;
 	    $callback->($self,$data,$changed,$args);
@@ -707,29 +735,33 @@ sub _imp_callback {
 # IMP specific stalled handling
 # if more than IMP_MAX_IN_ANALYZER are in the ibuf we will stop receiving
 # data and wait until callbacks decrease size of ibuf again
-# FIXME: make IMP_MAX_IN_ANALYZER configurable
 ############################################################################
-use constant IMP_MAX_IN_ANALYZER => 2**17;
 sub _check_stalled {
     my ($self,$dir) = @_;
     my $ibuf = $self->{ibuf}[$dir];
     my $size = $ibuf->[-1][0] + length($ibuf->[-1][1]) - $ibuf->[0][0];
 
-    if ( $size  > IMP_MAX_IN_ANALYZER ) {
-	return if $self->{stalled}[$dir];   # no change - still stalled
-	# set stalled and disable fd
-	$self->{stalled}[$dir] = 1;
-	my $relay = $self->{request}{conn}{relay} or return;
-	if ( my $fo = $relay->fd($dir)) {
-	    $fo->mask( r => 0 );
-	}
-    } else {
-	return if ! $self->{stalled}[$dir]; # no change - still not stalled
-	# set unstalled and enable fd
-	$self->{stalled}[$dir] = 0;
-	my $relay = $self->{request}{conn}{relay} or return;
-	if ( my $fo = $relay->fd($dir)) {
-	    $fo->mask( r => 1 );
+    if ( $IMP_MAX_IN_ANALYZER ) {
+	if ( $size  > $IMP_MAX_IN_ANALYZER ) {
+	    return if $self->{stalled}[$dir];   # no change - still stalled
+	    # set stalled and disable fd
+	    $self->{stalled}[$dir] = 1;
+	    $DEBUG && $self->{request}->xdebug(
+		"max in analyzer reached - set $dir to stalled");
+	    my $relay = $self->{request}{conn}{relay} or return;
+	    if ( my $fo = $relay->fd($dir)) {
+		$fo->mask( r => 0 );
+	    }
+	} else {
+	    return if ! $self->{stalled}[$dir]; # no change - still not stalled
+	    # set unstalled and enable fd
+	    $DEBUG && $self->{request}->xdebug(
+		"below max in analyzer - unstall $dir");
+	    $self->{stalled}[$dir] = 0;
+	    my $relay = $self->{request}{conn}{relay} or return;
+	    if ( my $fo = $relay->fd($dir)) {
+		$fo->mask( r => 1 );
+	    }
 	}
     }
 }
@@ -783,7 +815,7 @@ sub _imp_data {
 	if ( $pass == IMP_MAXOFFSET ) {
 	    # pass thru w/o analyzing
 	    $ibuf->[0][0] += $dlen;
-	    $DEBUG && debug("can pass($dir) infinite");
+	    $DEBUG && $self->{request}->xdebug("can pass($dir) infinite");
 	    return $callback->($self,$encoded_data // $data,0,$args);
 	}
 
@@ -797,10 +829,10 @@ sub _imp_data {
 	    if ( $data eq '' ) {
 		# forward eof to analyzer
 		$fwd = $data;
-		$DEBUG && debug("pass($dir) eof");
+		$DEBUG && $self->{request}->xdebug("pass($dir) eof");
 		goto SEND2IMP;
 	    }
-	    $DEBUG && debug(
+	    $DEBUG && $self->{request}->xdebug(
 		"can pass($dir) all: pass($canpass)>=data.len($dlen)");
 	    return $callback->($self,$encoded_data // $data,0,$args);
 	} elsif ( $type < 0 ) {
@@ -811,7 +843,7 @@ sub _imp_data {
 	    my $passed_data = substr($data,0,$canpass,'');
 	    $eobuf += $canpass;
 	    $dlen = length($data);
-	    $DEBUG && debug(
+	    $DEBUG && $self->{request}->xdebug(
 		"can pass($dir) part: pass($canpass)<data.len($dlen)");
 	    $callback->($self,$passed_data,0,$args); # callback but continue
 	}
@@ -827,7 +859,7 @@ sub _imp_data {
 	if ( $prepass == IMP_MAXOFFSET ) {
 	    # prepass everything
 	    $ibuf->[0][0] += $dlen;
-	    $DEBUG && debug("can prepass($dir) infinite");
+	    $DEBUG && $self->{request}->xdebug("can prepass($dir) infinite");
 	    $callback->($self,$encoded_data // $data,0,$args); # callback but continue
 	    goto SEND2IMP;
 	}
@@ -840,7 +872,7 @@ sub _imp_data {
 	    # can prepass everything
 	    $ibuf->[0][0] += $dlen;
 	    $callback->($self,$encoded_data // $data,0,$args); # callback but continue
-	    $DEBUG && debug(
+	    $DEBUG && $self->{request}->xdebug(
 		"can prepass($dir) all: pass($canprepass)>=data.len($dlen)");
 	    goto SEND2IMP;
 	} elsif ( $type < 0 ) {
@@ -851,7 +883,7 @@ sub _imp_data {
 	    my $passed_data = substr($data,0,$canprepass,'');
 	    $eobuf += $canprepass;
 	    $dlen = length($data);
-	    $DEBUG && debug(
+	    $DEBUG && $self->{request}->xdebug(
 		"can prepass($dir) part: prepass($canprepass)<data.len($dlen)");
 	    $callback->($self,$passed_data,0,$args); # callback but continue
 	}
@@ -878,12 +910,12 @@ sub _imp_data {
 	# different type or non-streaming data, add new buf
 	push @$ibuf,[ $offset||$eobuf,$data,$type,$callback,$args ];
     }
-    $DEBUG && debug( "ibuf.length=%d", 
+    $DEBUG && $self->{request}->xdebug( "ibuf.length=%d", 
 	$ibuf->[-1][0] + length($ibuf->[-1][1]) - $ibuf->[0][0]);
     _check_stalled($self,$dir) if ! $self->{stalled}[$dir];
 
     SEND2IMP:
-    $DEBUG && debug("forward(%d) %d bytes type=%s off=%d to analyzer",    
+    $DEBUG && $self->{request}->xdebug("forward(%d) %d bytes type=%s off=%d to analyzer",
 	$dir,length($fwd),$type,$offset);
     $self->{imp}->data($dir,$fwd,$offset,$type);
     return length($fwd);

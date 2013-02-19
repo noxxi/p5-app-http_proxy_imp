@@ -5,17 +5,18 @@ use warnings;
 package  App::HTTP_Proxy_IMP;
 use fields qw(addr impns filter pcapdir);
 
-use App::HTTP_Proxy_IMP::IMP;
+use App::HTTP_Proxy_IMP::IMP '$IMP_MAX_IN_ANALYZER';
 use App::HTTP_Proxy_IMP::Conn;
 use App::HTTP_Proxy_IMP::Request;
 use App::HTTP_Proxy_IMP::Relay;
 use AnyEvent;
 use Getopt::Long qw(:config posix_default bundling);
-use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG $DEBUG_RX);
+use App::HTTP_Proxy_IMP::Debug ();
+use Net::IMP::Debug qw(debug $DEBUG $DEBUG_RX);
 use Net::Inspect::Debug qw(%TRACE);
 use Carp 'croak';
 
-our $VERSION = '0.941';
+our $VERSION = '0.942';
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -104,9 +105,11 @@ sub start {
 	    poll => 'r',
 	    cb => sub {
 		my $cl = $srv->accept or return;
+		debug("new request from %s:%s on %s",$cl->peerhost,$cl->peerport,$addr);
 		App::HTTP_Proxy_IMP::Relay->new($cl,$upstream,$conn);
 	    }
 	);
+	debug("listening on $addr");
     }
 
     # on SIGUSR1 dump state of all relays
@@ -171,6 +174,7 @@ sub getoptions {
 	'T|trace=s' => sub { 
 	    $TRACE{$_} = 1 for split(m/,/,$_[1]) 
 	},
+	'max-in-analyzer=i' => \$IMP_MAX_IN_ANALYZER,
     );
 
     my @addr = @ARGV;
@@ -202,6 +206,10 @@ Options:
 		   Plugins outside these namespace need to be given with 
 		   full name.
 		   Defaults to App::HTTP_Proxy_IMP, Net::IMP
+
+  --max-in-analyzer L   set limit, on how many bytes may be send to IMP
+                   analyzer w/o getting feedback from analyzer, default 2^20.
+		   Set to 0 for unlimited
   
   # options intended for development and debugging:
   -P|--pcapdir D   save connections as pcap files into D, needs Net::PcapWriter

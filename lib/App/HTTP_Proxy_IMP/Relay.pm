@@ -79,7 +79,7 @@ sub xdebug {
 	unshift @_,$conn;
 	goto &$xdebug;
     } else {
-	debug(@_);
+	goto &debug;
     }
 }
 
@@ -247,7 +247,7 @@ sub xdebug {
 	unshift @_,$conn,$msg;
 	goto &$xdebug;
     } else {
-	debug(@_);
+	goto &debug;
     }
 }
 
