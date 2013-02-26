@@ -469,6 +469,7 @@ sub connect:method {
 		    $callback->();
 		} else {
 		    App::HTTP_Proxy_IMP::Relay::DNS::uncache($host,$addr);
+		    $self->{relay} or return; # relay already closed
 		    $self->{relay}->fatal("connect to $host.$port failed: $!");
 		}
 	    });
