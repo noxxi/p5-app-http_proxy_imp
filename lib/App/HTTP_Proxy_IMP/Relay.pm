@@ -63,13 +63,19 @@ sub account {
 	if ( ! defined $v ) {
 	    next;
 	} elsif ( ref($v) eq 'ARRAY') {
-	    $t = "$_=[".join(',',@$v)."]";
+	    $t = "$_=[".join(',',map { _quote($_) } @$v)."]";
 	} elsif ( defined $v ) {
-	    $t = "$_=$v"
+	    $t = "$_="._quote($v);
 	}
 	push @msg,$t;
     }
     print STDERR "ACCT @msg\n";
+}
+
+sub _quote {
+    my $text = shift;
+    $text =~s{([\000-\037\\"\377-\777])}{ sprintf("\\%03o",ord($1)) }eg;
+    return $text =~m{ } ? qq["$text"]:$text;
 }
 
 sub xdebug {

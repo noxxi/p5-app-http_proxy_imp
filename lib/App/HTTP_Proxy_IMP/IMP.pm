@@ -538,7 +538,7 @@ sub _imp_callback {
         if ( $rtype == IMP_DENY ) {
             my ($impdir,$msg) = @$rv;
 	    $DEBUG && $request->xdebug("got deny($impdir) $msg");
-            return $request->fatal($msg // 'closed by imp');
+            return $request->deny($msg // 'closed by imp');
 	}
 
         # log some data
