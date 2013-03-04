@@ -1,3 +1,6 @@
+0.943 2012-03-04
+- IMP_DENY: give 403 response with reason if response header was not sent yet
+- quote accounting values if necessary
 0.942 2013-02-21
 - better debugging 
 - accept replacements of empty buffers
