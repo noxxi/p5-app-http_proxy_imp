@@ -86,8 +86,7 @@ sub fatal {
 sub deny {
     my ($self,$reason) = @_;
     warn "[deny] ".$self->id." $reason\n";
-    if ( my $conn = $self->{conn} ) {
-        my $relay =  $conn->{relay};
+    if ( my $relay = $self->{conn} && $self->{conn}{relay} ) {
         $relay->account(%{ $self->{meta}}, %{ $self->{acct}}, 
 	    status => 'DENIED', reason => $reason );
 	$relay->forward(1,0,"HTTP/1.0 403 $reason\r\n\r\n") 
