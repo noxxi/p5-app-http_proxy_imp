@@ -1,3 +1,5 @@
+0.9431 2012-03-22
+- fix crash after IMP deny
 0.943 2012-03-04
 - IMP_DENY: give 403 response with reason if response header was not sent yet
 - quote accounting values if necessary
