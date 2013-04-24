@@ -134,7 +134,8 @@ sub new_analyzer {
 
     # set callback, this might trigger callback immediately if there are 
     # results pending
-    $analyzer->set_callback( \&_imp_callback,$self );
+    weaken( my $wself = $self );
+    $analyzer->set_callback( sub { _imp_callback($wself,@_) } );
     return $self;
 }
 
@@ -152,7 +153,7 @@ sub request_header {
     if ( ! $METHODS_WITHOUT_RQBODY{$xhdr->{method}} ) {
 	my $hlen = length($hdr);
 	$self->{fixup_header}[0] = sub {
-	    my ($hdr,%args) = @_;
+	    my ($self,$hdr,%args) = @_;
 	    my $size = $args{content};
 	    goto fix_clen if defined $size;
 
@@ -264,7 +265,7 @@ sub _request_header_imp {
 sub fixup_request_header {
     my ($self,$hdr_ref,%args) = @_;
     my $sub = $self->{fixup_header}[0] or return 1;
-    my $ok = $sub->($hdr_ref,%args);
+    my $ok = $sub->($self,$hdr_ref,%args);
     $self->{fixup_header}[0] = undef if $ok;
     return $ok;
 }
@@ -438,7 +439,7 @@ sub _response_header_imp {
 	    delete $xhdr->{fields}{'content-encoding'}
 	}
     }
-if ( defined $clen ) {
+    if ( defined $clen ) {
 	$xhdr->{fields}{'content-length'} = [ $clen ];
 	$xhdr->{content_length} = $clen;
     }

@@ -16,7 +16,7 @@ use Net::IMP::Debug qw(debug $DEBUG $DEBUG_RX);
 use Net::Inspect::Debug qw(%TRACE);
 use Carp 'croak';
 
-our $VERSION = '0.9432';
+our $VERSION = '0.9433';
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -92,14 +92,28 @@ sub start {
 
     # create listeners
     my @listen;
-    $self->{addr} = [ $self->{addr} ] if $self->{addr} && ! ref($self->{addr});
-    for my $addr (@{$self->{addr}}) {
-	my ($addr,$upstream) = split('=',$addr,2);
-	my $srv = $sockclass->new(
-	    LocalAddr => $addr,
-	    Listen    => 10,
-	    ReuseAddr => 1,
-	) or croak("cannot listen to $addr: $!");
+    $self->{addr} = [ $self->{addr} ] 
+	if $self->{addr} && ref($self->{addr}) ne 'ARRAY';
+    for my $spec (@{$self->{addr}}) {
+	my ($addr,$upstream) = 
+	    ref($spec) eq 'ARRAY' ? @$spec:
+	    ref($spec) ? ( $spec,undef ):
+	    split('=',$spec,2);
+	my $srv;
+	if ( ref($addr)) {
+	    # listing socket already
+	    $srv = $addr;
+	    (my $port,$addr) = AnyEvent::Socket::unpack_sockaddr( getsockname($srv));
+	    $addr = AnyEvent::Socket::format_address($addr);
+	    $addr = $addr =~m{:} ? "[$addr]:$port" : "$addr:$port";
+	} else {
+	    $srv = $sockclass->new(
+		LocalAddr => $addr,
+		Listen    => 10,
+		ReuseAddr => 1,
+	    ) or croak("cannot listen to $addr: $!");
+	}
+	$spec = [ $addr,$upstream,$srv ];
 	push @listen, AnyEvent->io(
 	    fh => $srv,
 	    poll => 'r',
@@ -302,10 +316,23 @@ The cmdline option can be given multiple times.
 If '-' is given at cmdline all previously defined prefixes (including defaults) are
 discarded.
 
-=item addr ARRAY|ip:port
+=item addr [spec+]
 
-List of ip:port combinations or single ip:port.
-These are the local addresses where the proxy will listen.
+Array of listener/upstream specifications for proxy.  
+Each specification can be
+
+=over 12
+
+=item ip:port - address where the proxy should listen
+
+=item ip:port=target_ip:port - listener address and upstream proxy address
+
+=item socket - precreated listener socket
+
+=item [ socket, target_ip:port ] - precreated listener socket and address of
+  upstream proxy
+
+=back
 
 On the cmdline these are given as the remaining arguments, e.g. after all
 other options.

@@ -39,11 +39,14 @@ my $HOSTNAME = hostname();
 use constant CONN_HOST => 1;
 use constant CONN_INTERNAL => 2;
 
-sub DESTROY { $DEBUG && debug("destroy request"); }
+sub DESTROY { 
+    $DEBUG && debug("destroy request"); 
+    #Devel::TrackObjects->show_tracked;
+}
 sub new_request {
     my ($factory,$meta,$conn) = @_;
-    $DEBUG && $conn->xdebug("new request");
     my $self = $factory->new;
+    $DEBUG && $conn->xdebug("new request $self");
 
     $self->{meta} = $meta;
     weaken($self->{conn} = $conn);
