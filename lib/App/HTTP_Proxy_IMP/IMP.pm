@@ -587,13 +587,17 @@ sub _imp_callback {
 		if ( $self->{pass}[$dir] == IMP_MAXOFFSET
 		    or $self->{prepass}[$dir] == IMP_MAXOFFSET ) {
 		    # there is no better thing than IMP_MAXOFFSET
+		    $DEBUG && debug("new off $offset no better than existing (pre)pass=max");
 		    next;
 		} elsif ( $offset == IMP_MAXOFFSET
 		    or $offset > $self->{ibuf}[$dir][0][0] ) {
 		    # we can prepass new data
 		    $self->{prepass}[$dir] = $offset;
+		    $DEBUG && debug("update prepass with new off $offset");
 		} else {
 		    # offset is no better than previous pass
+		    $DEBUG && debug(
+			"new off $offset no better than existing $self->{ibuf}[$dir][0][0]");
 		    next;
 		}
 	    }
@@ -624,7 +628,16 @@ sub _imp_callback {
 
 			# add empty buf if this was the last, this will also
 			# trigger resetting pass,prepass below
-			push @$ibuf, [ $offset,'' ] if ! @$ibuf; 
+			if ( @$ibuf ) { # still data in buffer
+			} elsif (  $ib0->[2] < 0 ) {
+			    # no eof yet and no further data in ibuf 
+			    # we might get a replacement at the end of the 
+			    # buffer so put emptied buffer back
+			    $ib0->[1] = '';
+			    push @$ibuf, $ib0;
+			} else {
+			    push @$ibuf, [ $offset,'' ];
+			}
 			last;
 		    } elsif ( $ib0->[2] < 0 ) {
 			# streaming type: 
@@ -702,8 +715,16 @@ sub _imp_callback {
 		$ib0->[0] += $rlen;
 	    } else {
 		# remove complete buffer
-		shift(@$ibuf);
-		push @$ibuf, [ $offset,'' ] if ! @$ibuf;
+		if ( @$ibuf>1 ) { # still data in buffer
+		} elsif (  $ib0->[2] < 0 ) {
+		    # no eof yet and no further data in ibuf 
+		    # we might get a replacement at the end of the 
+		    # buffer so put emptied buffer back
+		    $ib0->[1] = '';
+		} else {
+		    # replace with empty
+		    @$ibuf = [ $offset,'' ];
+		}
 	    }
 
 	    push @{$fwd{$dir}}, [
@@ -984,7 +1005,7 @@ sub _create_decoder {
 	    return $more if length($buf) < $hdr_len; 
 	    my ($magic,$method,$flags) = unpack('vCC',$buf);
 	    if ( $magic != 0x8b1f or $method != Z_DEFLATED or $flags & 0xe0 ) {
-		debug("no valid gzip header. assuming plain text");
+		$DEBUG && debug("no valid gzip header. assuming plain text");
 		$inflate = ''; # defined but false
 		goto inflate;
 	    }
@@ -1069,7 +1090,7 @@ sub _create_decoder {
 		$gzip_csum = 0;
 	    }
 	} elsif ( $stat != Z_OK ) {
-	    debug("decode failed: $stat");
+	    $DEBUG && debug("decode failed: $stat");
 	    return; # error
 	}
 	return $out 
