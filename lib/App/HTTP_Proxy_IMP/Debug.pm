@@ -18,7 +18,7 @@ my @context;
 sub debug {
     if (@context) {
 	my $msg = shift;
-	$msg = sprintf($msg,@_) if @_;
+	$msg = do { no warnings; sprintf($msg,@_) } if @_;
 	my %args;
 	%args = ( %args, @$_ ) for(@context);
 	if ( my $id = delete $args{id} ) {

@@ -36,7 +36,7 @@ sub new {
     my ($class,@args) = @_;
     my $self = fields::new($class);
     $self->{impns} = [qw(App::HTTP_Proxy_IMP::IMP Net::IMP::HTTP Net::IMP)];
-    %$self = %{ shift(@args) } if @args && ref($args[0]);
+    %$self = ( %$self, %{ shift(@args) }) if @args && ref($args[0]);
     $self->getoptions(@args) if @args;
     return $self;
 }
