@@ -93,14 +93,14 @@ sub xdebug {
 # non-fatal problem
 sub error {
     my ($self,$reason) = @_;
-    warn "[error] ".$self->{conn}->id." $reason\n";
+    warn "[error] ".( $self->{conn} && $self->{conn}->id || 'noid')." $reason\n";
     return 0;
 }
 
 # fatal problem - close connection
 sub fatal {
     my ($self,$reason) = @_;
-    warn "[fatal] ".$self->{conn}->id." $reason\n";
+    warn "[fatal] ".( $self->{conn} && $self->{conn}->id || 'noid')." $reason\n";
     $self->close;
     return 0;
 }
@@ -375,7 +375,7 @@ sub _writebuf {
     my $self = shift;
     #debug("write $self fn=".fileno($self->{fd}));
     my $n = syswrite($self->{fd},$self->{wbuf});
-    #debug("write done: ". (defined $n ? $n : $!));
+    #debug("write(%s,%d) -> %s", $self->{dir},length($self->{wbuf}), (defined $n ? $n : $!));
     if ( ! defined $n ) {
         $self->{relay}->fatal("write($self->{dir}) failed: $!")
 	    unless $!{EINTR} or $!{EAGAIN};
@@ -400,6 +400,9 @@ sub _writebuf {
 	if ( my $src = $self->{wsrc} ) {
 	    $self->{relay}->mask($_, r=>1) for (keys %$src);
 	}
+    } else {
+	# need to write more later
+	mask($self,w=>1);
     }
     return $n;
 }
