@@ -15,10 +15,13 @@ use Scalar::Util 'weaken';
 use fields (
     # all connections
     'pcapdir',     # dir for writing pcaps
+    'mitm',        # IO::Socket::SSL::Intercept object for SSL interception
+    'capath',      # path to file|direcory with CA certificates
     'imp_factory', # App::HTTP_Proxy_IMP::IMP factory
     # per connection
     'spool',       # any data which cannot be processed yet?
     'pcapw',       # Net::PcapWriter object
+    'intunnel',    # true if connections is inside intercepted SSL tunnel
     'relay',       # weak reference to managing relay
 );
 
@@ -29,6 +32,8 @@ sub new {
     if ( ref($class)) { # from factory
 	$self->{pcapdir} ||= $class->{pcapdir};
 	$self->{imp_factory} ||= $class->{imp_factory};
+	$self->{mitm} ||= $class->{mitm};
+	$self->{capath} ||= $class->{capath};
     }
     return $self;
 }
@@ -37,6 +42,14 @@ sub DESTROY {
     my $self = shift or return;
     $self->xdebug("connection done"); 
     $self->SUPER::DESTROY();
+}
+
+sub clone {
+    my $self = shift;
+    return $self->new_connection(
+	$self->{meta},
+	$self->{relay}
+    );
 }
 
 sub new_connection {

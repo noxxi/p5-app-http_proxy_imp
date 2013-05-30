@@ -1,3 +1,7 @@
+0.945 2012-05-30
+- add SSL interception feature, see documentation and look for mitm_ca
+- more reliable accounting
+- imporove meta data in Makefile.PL
 0.944 2012-05-03
 - fixed bug where it did not write remaining data after short write and thus
   caused the connection to hang.

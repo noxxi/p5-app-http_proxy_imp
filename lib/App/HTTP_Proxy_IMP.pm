@@ -3,7 +3,7 @@ use strict;
 use warnings;
 
 package  App::HTTP_Proxy_IMP;
-use fields qw(addr impns filter pcapdir);
+use fields qw(addr impns filter pcapdir mitm_ca capath no_check_certificate);
 
 use App::HTTP_Proxy_IMP::IMP '$IMP_MAX_IN_ANALYZER';
 use App::HTTP_Proxy_IMP::Conn;
@@ -14,9 +14,11 @@ use Getopt::Long qw(:config posix_default bundling);
 use App::HTTP_Proxy_IMP::Debug ();
 use Net::IMP::Debug qw(debug $DEBUG $DEBUG_RX);
 use Net::Inspect::Debug qw(%TRACE);
+use IO::Socket::SSL::Intercept;
+use IO::Socket::SSL::Utils;
 use Carp 'croak';
 
-our $VERSION = '0.944';
+our $VERSION = '0.945';
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -51,6 +53,63 @@ sub start {
 	eval { require Net::PcapWriter } or croak(
 	    "cannot load Net::PcapWriter, which is needed with --pcapdir option");
     }
+
+    my $mitm;
+    if ( my $f = $self->{mitm_ca} ) {
+	my $serial = 1;
+	my $cache = {};
+	my $cachedir = "$f.cache";
+	if ( -d $cachedir || mkdir($cachedir,0700)) {
+	    for my $f (glob("$cachedir/*.pem")) {
+		-f $f && -r _ && -s _ or next;
+		my $time = (stat(_))[9];
+		my $key  = PEM_file2key($f) or next;
+		my $cert = PEM_file2cert($f) or next;
+		my $sn = CERT_asHash($cert)->{serial};
+		$serial = $sn+1 if $sn>=$serial;
+		my ($id) = $f=~m{/([^/]+)\.pem$};
+		$cache->{$id} = {
+		    cert => $cert,
+		    key => $key,
+		    atime => $time,
+		};
+		debug("loaded certificate id=$id from cache");
+	    }
+
+	    my $cache_hash = $cache;
+	    $cache = sub {
+		my $id = shift;
+		my $e;
+		if ( ! @_ ){ # get
+		    $e = $cache_hash->{$id} or return;
+		} else {
+		    my ($cert,$key) = @_;
+		    $e = $cache_hash->{$id} = {
+			cert => $cert,
+			key => $key,
+		    };
+		}
+		my $f = "$cachedir/$id.pem";
+		if ( @_ || ! -f $f and open( my $fh,">",$f )) {
+		    debug("save mitm certificate and key to $cachedir/$id.pem");
+		    print $fh PEM_cert2string($e->{cert}),
+			PEM_key2string($e->{key})
+		} else {
+		    utime(undef,undef,$f);
+		}
+		$e->{atime} = time();
+		return ($e->{cert},$e->{key});
+	    };
+	}
+
+	$mitm = IO::Socket::SSL::Intercept->new(
+	    proxy_cert_file => $f,
+	    proxy_key_file  => $f,
+	    cache => $cache,
+	    serial => $serial,
+	);
+    }
+
     my $imp_factory;
     my $filter = $self->{filter};
     if ($filter && @$filter ) {
@@ -83,10 +142,27 @@ sub start {
 	$imp_factory = App::HTTP_Proxy_IMP::IMP->new_factory(@mod);
     }
 
+    my $capath = $self->{capath};
+    if ( $self->{no_check_certificate} ) {
+	$capath = undef;
+    } elsif ( ! $capath ) {
+	if ( eval { require Mozilla::CA } ) {
+	    $capath = Mozilla::CA::SSL_ca_file();
+	} elsif ( glob("/etc/ssl/certs/*.pem") ) {
+	    $capath = "/etc/ssl/certs";
+	} elsif ( -f "/etc/ssl/certs.pem" && -r _ && -s _ ) {
+	    $capath = "/etc/ssl/certs.pem";
+	} else {
+	    croak "cannot determine CA path, needed for SSL interception"
+	}
+    }
+
     # create connection fabric, attach request handling
     my $req  = App::HTTP_Proxy_IMP::Request->new;
     my $conn = App::HTTP_Proxy_IMP::Conn->new($req, 
 	pcapdir     => $pcapdir, 
+	mitm        => $mitm,
+	capath      => $capath,
 	imp_factory => $imp_factory
     );
 
@@ -160,7 +236,10 @@ sub getoptions {
     local @ARGV = @_;
     GetOptions(
 	'h|help'      => sub { usage() },
-	'P|pcapdir=s' => sub { $self->{pcapdir} = $_[1] },
+	'P|pcapdir=s' => \$self->{pcapdir},
+	'mitm-ca=s'   => \$self->{mitm_ca},
+	'capath=s'    => \$self->{capath},
+	'no-check-certificate=s' => \$self->{no_check_certificate},
 	'F|filter=s'  => sub { 
 	    if ($_[1] eq '-') { 
 		# discard all previously defined
@@ -213,6 +292,16 @@ ip:port=upstream_ip:port - listen adress and upstream proxy
 
 Options:
   -h|--help        show usage
+
+  --mitm-ca ca.pem use given file in PEM format as a Proxy-CA for intercepting
+                   SSL connections (e.g. man in the middle). Should include key
+		   and cert.
+  --capath P       path to file or dir containing CAs, which are used to verify
+                   server certificates when intercepting SSL.
+		   Tries to use builtin default if not given.
+  --no-check-certificate  do not check server certificates when intercepting
+                   SSL connections
+
   -F|--filter F    add named IMP plugin as filter, can be used multiple times
                    with --filter mod=args arguments can be given to the filter
   --imp-ns N       perl module namespace, were it will look for IMP plugins.
@@ -268,7 +357,7 @@ App::HTTP_Proxy_IMP - HTTP proxy with the ability to inspect and modify content
 
     # show cmdline usage
     App::HTTP_Proxy_IMP->usage();
-    
+
 =head1 DESCRIPTION
 
 App::HTTP_Proxy_IMP implements an HTTP proxy, which can inspect and modify the
@@ -337,6 +426,42 @@ Each specification can be
 On the cmdline these are given as the remaining arguments, e.g. after all
 other options.
 
+=item mitm_ca proxy_ca.pem
+
+When this parameter is given it will intercept SSL connections by ending the
+connection from the server at the proxy and creating a new connection with a
+new certificate signed by the given ca.pem (e.g. man in the middle).
+Thus it will be able to analyse and manipulate encrypted connections.
+
+ca.pem needs to include the CA cert and key in PEM format.
+Also you better import the CA certificate into your browser, or you will get
+warnings on access to SSL sites, because of the correctly detected man in the
+middle attack.
+
+To generate the proxy certificate you might use openssl:
+
+   openssl genrsa -out key.pem 1024
+   openssl req -new -x509 -extensions v3_ca -key key.pem -out proxy_ca.pem 
+   cat key.pem >> proxy_ca.pem
+   # export to PKCS12 for import into browser
+   openssl pkcs12 -export -in proxy_ca.pem -inkey proxy_ca.pem -out proxy_ca.p12
+
+It will try to create the directory proxy_ca.pem.cache and use it as a cache
+for generated cloned certificates. If this is not possible the cloned certificates
+will persist over restarts of the proxy.
+
+=item capath certs.pem | cert-dir
+
+The path (file with certificates or directory) with the CAs, which are used to
+verify SSL certificates when doing SSL interception.
+If not given it will check initially for various path, starting with using
+Mozilla::CA, trying /etc/ssl/certs and /etc/ssl/certs.pem before giving up and
+exiting.
+
+=item no_check_certificate
+
+If true disables checking of SSL certificates when doing SSL interception.
+
 =back
 
 The following options are only for the cmdline
@@ -360,7 +485,7 @@ L<Net::Inspect::Debug> package.
 
 =back
 
-=item start
+=item * start
 
 Start the proxy, e.g. start listeners and process incoming connections.
 No arguments are expected if called on an object, but one can use the form
@@ -371,6 +496,8 @@ If no return value is expected from this method it will enter into an endless
 loop using C<< AnyEvent->condvar->recv >>.
 If a value is expected it will return 1, and the caller hast to enter the
 AnyEvent mainloop itself.
+
+=back
 
 =head2 Reaction to Signals
 

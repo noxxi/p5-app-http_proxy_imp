@@ -21,6 +21,7 @@ use fields (
     'defer_rqbody', # deferred request body (wait until header can be sent)
 
     'method',       # request method
+    'rqhost',       # hostname from request
     'rq_version',   # version of request
     'rp_encoder',   # sub to encode response body (chunked)
     'keep_alive',   # do we use keep_alive in response
@@ -52,14 +53,13 @@ sub new_request {
     weaken($self->{conn} = $conn);
     $self->{defer_rqhdr} = $self->{defer_rqbody} = '';
 
-    $self->{acct} = { Id => $self->id };
+    $self->{acct} = { %$meta, Id => $self->id };
     if ( my $f = $conn->{imp_factory} ) {
 	$self->{imp_analyzer} = $f->new_analyzer($self,$meta);
     }
 
     $self->{me_proxy} = $HOSTNAME;
     $self->{up_proxy} = $meta->{upstream};
-
 
     return $self;
 }
@@ -81,7 +81,7 @@ sub fatal {
     warn "[fatal] ".$self->id." $reason\n";
     if ( my $conn = $self->{conn} ) {
         my $relay =  $conn->{relay};
-        $relay->account(%{ $self->{meta}}, %{ $self->{acct}});
+        $relay->account('fatal');
         $relay->close;
     }
 }
@@ -90,8 +90,7 @@ sub deny {
     my ($self,$reason) = @_;
     warn "[deny] ".$self->id." $reason\n";
     if ( my $relay = $self->{conn} && $self->{conn}{relay} ) {
-        $relay->account(%{ $self->{meta}}, %{ $self->{acct}}, 
-	    status => 'DENIED', reason => $reason );
+        $relay->account('deny', status => 'DENIED', reason => $reason );
 	$relay->forward(1,0,"HTTP/1.0 403 $reason\r\n\r\n") 
 	   if ! $self->{acct}{code};
 	$relay->close;
@@ -126,6 +125,7 @@ sub in_request_header {
 	return;
     }
 
+    $conn->{relay}->acctinfo($self->{acct});
     $conn->{spool} = []; # mark connection as processing request
 
     my $relay = $conn->{relay} or return;
@@ -174,6 +174,8 @@ sub _request_header_after_imp {
 	# only possible if we work as proxy
 	return $self->fatal("connect request only allowed on proxy")
 	    if ! defined $self->{me_proxy};
+	return $self->fatal("connect request not allowed inside ssl tunnel")
+	    if $conn->{intunnel};
 
 	# url should be host[:port]
 	$url =~m{^(?:\[([\w\-.:]+)\]|([\w\-.]+))(?::(\d+))$} or
@@ -223,8 +225,10 @@ sub _request_header_after_imp {
     }
 
     $self->{acct}{url} = $url;
+    $self->{acct}{url} =~s{://}{s://} if $conn->{intunnel};
     $self->{acct}{method} = $met;
     $self->{acct}{reqid} = $self->{meta}{reqid};
+    $self->{rqhost} = $host;
 
     if ( $met eq 'CONNECT' and ! $self->{up_proxy} ) {
 	# just skip all the header manipulation and normalization, we don't
@@ -306,10 +310,14 @@ sub _request_header_after_imp {
 	}
     }
 
-    $relay->connect( 1,
-	@{ $self->{up_proxy} || [ $host,$port ] },
-	sub { _fwd_request_after_connect($self,$hdr) }
-    );
+    if ( $conn->{intunnel} ) {
+	_fwd_request_after_connect($self,$hdr);
+    } else {
+	$relay->connect( 1,
+	    @{ $self->{up_proxy} || [ $host,$port ] },
+	    sub { _fwd_request_after_connect($self,$hdr) }
+	);
+    }
 }
 
 sub _fwd_request_after_connect {
@@ -538,6 +546,11 @@ sub _response_header_after_imp {
     # forward header
     $DEBUG && $self->xdebug("output hdr: $hdr");
     $relay->forward(1,0,$hdr);
+
+    if ( $self->{method} eq 'CONNECT' ) {
+	# upgrade server side and client side with SSL, but intercept traffic
+	$relay->sslify(1,0,$self->{rqhost});
+    }
 }
 
 
@@ -577,7 +590,7 @@ sub _response_body_after_imp {
     } 
 
     if ($eof) {
-        $relay->account(%{ $self->{meta}}, %{ $self->{acct}});
+        $relay->account('request');
 	if ( ! $self->{keep_alive} ) {
 	    # close connection
 	    $DEBUG && $self->xdebug("end of request: close");
@@ -603,7 +616,7 @@ sub in_data {
 	my $debug = $DEBUG && debug_context( id => $self->id);
 	$data ne '' and $imp->data($dir,$data,\&_in_data_imp,$self);
 	$eof and $imp->data($dir,'',\&_in_data_imp,$self);
-    } elsif ( $data ne '' ) {
+    } else {
 	my $relay = $self->{conn}{relay} or return;
 	$DEBUG && $self->xdebug("got %d bytes from %d, eof=%d",length($data),$dir,$eof);
 	if ( $data ne '' ) {
@@ -613,6 +626,7 @@ sub in_data {
 		$relay->forward(0,1,$data) if $self->{connected} == CONN_HOST;
 	    }
 	}
+	$relay->account('upgrade') if $eof;
     }
 }
 sub _in_data_imp {
@@ -626,6 +640,8 @@ sub _in_data_imp {
 	    $relay->forward(0,1,$data) if $self->{connected} == CONN_HOST;
 	}
     }
+
+    $relay->account('upgrade') if $eof;
 }
 
 ############################################################################

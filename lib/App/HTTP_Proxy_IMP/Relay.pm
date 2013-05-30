@@ -5,10 +5,12 @@ package App::HTTP_Proxy_IMP::Relay;
 use fields (
     'fds',      # file descriptors
     'conn',     # App::HTTP_Proxy_IMP::HTTPConn object
+    'acct',     # collect accounting
 );
 
 use App::HTTP_Proxy_IMP::Debug;
 use Scalar::Util 'weaken';
+use IO::Socket::SSL;
 use AnyEvent;
 
 # active relay, inserted in new, removed in $idlet timer
@@ -48,18 +50,27 @@ sub new {
 
 sub DESTROY {
     my $self = shift;
+    $self->account('destroy');
     $self->xdebug("destroy relay $self");
 }
 
+sub acctinfo {
+    my ($self,$acct) = @_;
+    $self->{acct} = $acct;
+}
 sub account {
-    my ($self,%args) = @_;
-    if ( my $t = delete $args{start} ) {
-	$args{duration} = AnyEvent->now - $t;
+    my ($self,$what,%args) = @_;
+    my $acct = $self->{acct};
+    $acct = $acct ? { %$acct,%args } : \%args if %args;
+    $acct or return;
+    $self->{acct} = undef;
+    if ( my $t = delete $acct->{start} ) {
+	$acct->{duration} = AnyEvent->now - $t;
     }
     my @msg;
-    for( sort keys %args ) {
+    for( sort keys %$acct ) {
 	my $t;
-	my $v = $args{$_};
+	my $v = $acct->{$_};
 	if ( ! defined $v ) {
 	    next;
 	} elsif ( ref($v) eq 'ARRAY') {
@@ -133,6 +144,56 @@ sub forward {
 	$self->fatal("cannot write to $to - no such fo");
     $self->xdebug("$to>$from - forward %d bytes",length($data));
     $fo->write($data,$from);
+}
+
+# ssl interception, e.g. upgrade both client and server to SSL sockets,
+# where I can read/write unencrypted data
+sub sslify {
+    my ($self,$from,$to,$hostname,$callback) = @_;
+    my $conn = $self->{conn} or return;
+    my $mitm = $conn->{mitm} or return; # no MITM needed
+
+    # destroy the current connection object and create a new obne
+    $conn = $self->{conn} = $conn->clone;
+    $conn->{intunnel} = 1;
+    
+    my $sfo = $self->{fds}[$from] or return
+	$self->fatal("cannot startssl $from - no such fo");
+
+    # stop handling all data
+    $self->mask($to,r=>0);
+    $self->mask($from,r=>0);
+    weaken( my $wself = $self );
+
+    my %sslargs = (
+	SSL_verifycn_name => $hostname,
+	SSL_verifycn_schema => 'http',
+	SSL_hostname => $hostname, # SNI
+	$conn->{capath} ? (
+	    SSL_verify_mode => SSL_VERIFY_PEER,
+	    ( -d $conn->{capath} ? 'SSL_ca_path' : 'SSL_ca_file' ), 
+	    $conn->{capath}
+	):( 
+	    SSL_verify_mode => SSL_VERIFY_NONE 
+	)
+    );
+    $sfo->startssl( %sslargs, sub {
+	my $sfo = shift;
+	my ($cert,$key) = $mitm->clone_cert($sfo->{fd}->peer_certificate);
+	my $cfo = $wself->{fds}[$to] or return
+	    $wself->fatal("cannot startssl $to - no such fo");
+	$cfo->startssl(
+	    SSL_server => 1,
+	    SSL_cert => $cert,
+	    SSL_key  => $key,
+	    sub {
+		# allow data again
+		$self->mask($to,r=>1);
+		$self->mask($from,r=>1);
+		$callback->() if $callback;
+	    }
+	);
+    });
 }
 
 # closes relay
@@ -216,6 +277,7 @@ use Carp 'croak';
 use Scalar::Util 'weaken';
 use App::HTTP_Proxy_IMP::Debug;
 use AnyEvent::Socket qw(tcp_connect format_address);
+use IO::Socket::SSL;
 
 use fields (
     'dir',        # direction 0,1
@@ -313,33 +375,32 @@ sub shutdown:method {
 
 
 sub mask {
-    my ($self,$rw,$mask) = @_;
-    #debug("$self->{dir} $self->{fd} fn=".fileno($self->{fd})." $rw=>$mask");
+    my ($self,$rw,$val) = @_;
+    #debug("$self->{dir} $self->{fd} fn=".fileno($self->{fd})." $rw=>$val");
     if ( $rw eq 'r' ) {
-	if ( ! $mask ) {
+	if ( ! $val ) {
 	    # disable read
 	    undef $self->{rwatch};
-	} elsif ( ! $self->{rwatch} ) {
-	    # enable read if not enabled
+	} else {
 	    $self->{status} & 0b100 and return 0; # read shutdown already
 	    $self->{rsub} ||= sub { _read($self) }; 
 	    $self->{rwatch} = AnyEvent->io(
 		fh => $self->{fd},
 		poll => 'r',
-		cb => $self->{rsub}
+		cb => ref($val) ? $val : $self->{rsub}
 	    );
 	}
     } elsif ( $rw eq 'w' ) {
-	if ( ! $mask ) {
+	if ( ! $val ) {
 	    # disable write
 	    undef $self->{wwatch};
-	} elsif ( $self->{wbuf} ne '' and ! $self->{wwatch} ) {
+	} else {
 	    $self->{status} & 0b010 and return 0; # write shutdown already
 	    $self->{wsub} ||= sub { _writebuf($self) }; 
 	    $self->{wwatch} = AnyEvent->io(
 		fh => $self->{fd},
 		poll => 'w',
-		cb => $self->{wsub}
+		cb => ref($val) ? $val : $self->{wsub}
 	    );
 	}
     } else {
@@ -489,6 +550,46 @@ sub connect:method {
     });
     return -1;
 }
+
+sub startssl {
+    my $self = shift;
+    $self->{rbuf} eq '' or return 
+	$self->{relay}->fatal("read buf not empty before starting SSL");
+    $self->{wbuf} eq '' or return 
+	$self->{relay}->fatal("write buf not empty before starting SSL");
+
+    my $callback = @_%2 ? pop(@_):undef;
+    my %sslargs = @_;
+    IO::Socket::SSL->start_SSL( $self->{fd},
+	%sslargs,
+	SSL_startHandshake => 0,
+    ) or die "failed to upgrade socket to SSL";
+    my $sub = $sslargs{SSL_server} 
+	? \&IO::Socket::SSL::accept_SSL
+	: \&IO::Socket::SSL::connect_SSL;
+    _ssl($self,$sub,$callback,\%sslargs);
+}
+
+sub _ssl {
+    my ($self,$sub,$cb,$sslargs) = @_;
+    if ( $sub->($self->{fd}) ) {
+	$self->xdebug("ssl handshake success");
+	$cb->($self) if $cb;
+    } elsif ( $!{EAGAIN} ) {
+	# retry
+	my $dir = 
+	    $SSL_ERROR == SSL_WANT_READ ? 'r' :
+	    $SSL_ERROR == SSL_WANT_WRITE ? 'w' :
+	    return $self->{relay}->fatal( "unhandled $SSL_ERROR on EAGAIN" );
+	$self->mask( $dir => sub { _ssl($self,$sub,$cb,$sslargs) });
+    } elsif ( $sslargs->{SSL_server} ) {
+	return $self->{relay}->fatal( "error on accept_SSL: $SSL_ERROR|$!" );
+    } else {
+	return $self->{relay}->fatal( 
+	    "error on connect_SSL to $sslargs->{SSL_verifycn_name}: $SSL_ERROR|$!" );
+    }
+}
+
 
 ############################################################################
 # DNS cache
