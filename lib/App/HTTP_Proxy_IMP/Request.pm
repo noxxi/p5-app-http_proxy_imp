@@ -550,9 +550,10 @@ sub _response_header_after_imp {
     $relay->forward(1,0,$hdr);
 
     if ( $self->{method} eq 'CONNECT' ) {
-	# upgrade server side and client side with SSL, but intercept traffic
-	$relay->mask(1, w => sub {
-	    $relay->mask(1, w => undef );
+	# upgrade server side and client side with SSL, but intercept traffic.
+	# need to be called outside the current event handler, because $hdr
+	# will only be removed from rbuf after the current handler is done
+	App::HTTP_Proxy_IMP->once( sub {
 	    $relay->sslify(1,0,$self->{rqhost});
 	});
     }

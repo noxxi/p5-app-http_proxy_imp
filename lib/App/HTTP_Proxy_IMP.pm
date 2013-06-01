@@ -18,7 +18,7 @@ use IO::Socket::SSL::Intercept;
 use IO::Socket::SSL::Utils;
 use Carp 'croak';
 
-our $VERSION = '0.945_001';
+our $VERSION = '0.946';
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -226,9 +226,26 @@ sub start {
     });
 
     return 1 if defined wantarray;
+    $self->loop;
+}
 
-    # enter Mainloop myself
-    AnyEvent->condvar->recv;
+{
+    my $loop;
+    my @once;
+    sub once { 
+	shift;
+	push @once, shift;
+	$loop->send if $loop;
+    }
+    sub loop {
+	shift;
+	# enter Mainloop myself
+	while (1) {
+	    shift(@once)->() while (@once);
+	    $loop = AnyEvent->condvar;
+	    $loop->recv;
+	}
+    }
 }
 
 sub getoptions {
@@ -493,9 +510,20 @@ C<< App::HTTP_Proxy_IMP->start(@args) >> as a shorter alternative to
 C<< App::HTTP_Proxy_IMP->new(@args)->start >>.
 
 If no return value is expected from this method it will enter into an endless
-loop using C<< AnyEvent->condvar->recv >>.
-If a value is expected it will return 1, and the caller hast to enter the
-AnyEvent mainloop itself.
+loop by calling C<loop>.
+If a value is expected it will return 1, and the caller hast to call C<loop>
+itself.
+
+=item * loop
+
+Class method, which calls AnyEvent mainloop using C<< AnyEvent->condvar->recv >>
+and handles all callback send by C<once>.
+
+=item * once
+
+Sometimes it is necessary to let the current event handler finish, before
+calling some specific action. The class method C<once> schedules a subroutine to
+be called outside any other event handlers.
 
 =back
 
