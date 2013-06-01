@@ -510,6 +510,8 @@ sub _response_header_after_imp {
     # (Pragma...) which we don't know how to translate
     if ( defined $clen ) {
 	$DEBUG && $self->xdebug("have content-length $clen");
+    } elsif ( $self->{method} eq 'CONNECT' ) {
+	$DEBUG && $self->xdebug("have connect request");
     } else {
 	if  ( $version eq '1.1' and $self->{rq_version} eq '1.1' ) {
 	    $head->{'transfer-encoding'} = [ 'chunked' ];
@@ -549,7 +551,10 @@ sub _response_header_after_imp {
 
     if ( $self->{method} eq 'CONNECT' ) {
 	# upgrade server side and client side with SSL, but intercept traffic
-	$relay->sslify(1,0,$self->{rqhost});
+	$relay->mask(1, w => sub {
+	    $relay->mask(1, w => undef );
+	    $relay->sslify(1,0,$self->{rqhost});
+	});
     }
 }
 

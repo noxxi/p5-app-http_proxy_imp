@@ -463,6 +463,7 @@ sub _writebuf {
 	}
     } else {
 	# need to write more later
+	#debug("need to write more");
 	mask($self,w=>1);
     }
     return $n;
@@ -554,9 +555,9 @@ sub connect:method {
 sub startssl {
     my $self = shift;
     $self->{rbuf} eq '' or return 
-	$self->{relay}->fatal("read buf not empty before starting SSL");
+	$self->{relay}->fatal("read buf $self->{dir} not empty before starting SSL: '$self->{rbuf}'");
     $self->{wbuf} eq '' or return 
-	$self->{relay}->fatal("write buf not empty before starting SSL");
+	$self->{relay}->fatal("write buf $self->{dir} not empty before starting SSL: '$self->{wbuf}'");
 
     my $callback = @_%2 ? pop(@_):undef;
     my %sslargs = @_;
