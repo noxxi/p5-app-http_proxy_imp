@@ -1,9 +1,10 @@
-use ExtUtils::MakeMaker;
+use strict;
+use ExtUtils::MakeMaker 6.46;
 require 5.12.4;
 WriteMakefile(
     NAME => 'App::HTTP_Proxy_IMP',
     ABSTRACT => 'HTTP(s) proxy with interface to analyze and manipulate data',
-    AUTHOR => [ 'Steffen Ullrich <sullr@cpan.org>' ],
+    AUTHOR => 'Steffen Ullrich <sullr@cpan.org>',
     LICENSE => 'perl',
     META_MERGE => {
         resources => {
