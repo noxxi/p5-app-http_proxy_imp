@@ -1,22 +1,24 @@
-0.946 2012-06-01
+0.947 2013-06-04
+- fix Bug when full buffer got replaced
+0.946 2013-06-01
 - fix SSL intercept when using upstream proxy
-0.945 2012-05-30
+0.945 2013-05-30
 - add SSL interception feature, see documentation and look for mitm_ca
 - more reliable accounting
 - imporove meta data in Makefile.PL
-0.944 2012-05-03
+0.944 2013-05-03
 - fixed bug where it did not write remaining data after short write and thus
   caused the connection to hang.
-0.9434 2012-04-26
+0.9434 2013-04-26
 - fixed issue when getting a pass until last data, but no eof yet. Occured
   together with Net::IMP::Cascade when using multiple filters
-0.9433 2012-04-24
+0.9433 2013-04-24
 - fixed memory leak
-0.9432 2012-04-09
+0.9432 2013-04-09
 - ignore 1xx preliminary responses, e.g. do not send to IMP plugin
-0.9431 2012-03-22
+0.9431 2013-03-22
 - fix crash after IMP deny
-0.943 2012-03-04
+0.943 2013-03-04
 - IMP_DENY: give 403 response with reason if response header was not sent yet
 - quote accounting values if necessary
 0.942 2013-02-21

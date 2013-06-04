@@ -704,7 +704,7 @@ sub _imp_callback {
 		return $request->fatal(
 		    "replacement cannot span multiple data types") 
 		    if @$ibuf>1 or $ib0->[2]>0;
-		return $request->fatal("cannot replace future data");
+		return $request->fatal("cannot replace future data ($rlen>$len0)");
 	    } elsif ( $rlen < $len0 ) {
 		# replace part of buffer
 		return $request->fatal("cannot replace part of packet type")
@@ -720,6 +720,7 @@ sub _imp_callback {
 		    # no eof yet and no further data in ibuf 
 		    # we might get a replacement at the end of the 
 		    # buffer so put emptied buffer back
+		    $ib0->[0] += $len0;
 		    $ib0->[1] = '';
 		} else {
 		    # replace with empty
