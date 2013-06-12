@@ -18,7 +18,7 @@ use IO::Socket::SSL::Intercept;
 use IO::Socket::SSL::Utils;
 use Carp 'croak';
 
-our $VERSION = '0.947';
+our $VERSION = '0.948';
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -142,10 +142,15 @@ sub start {
 	$imp_factory = App::HTTP_Proxy_IMP::IMP->new_factory(@mod);
     }
 
-    my $capath = $self->{capath};
-    if ( $self->{no_check_certificate} ) {
-	$capath = undef;
-    } elsif ( ! $capath ) {
+    my $capath;
+    if ( ! $mitm ) {
+	# no interception = no certificate checking
+    } elsif ( $self->{no_check_certificate} ) {
+	# no certificate checking
+    } elsif ( $capath = $self->{capath} ) {
+	# use this capath
+    } else {
+	# try to guess capath
 	if ( eval { require Mozilla::CA } ) {
 	    $capath = Mozilla::CA::SSL_ca_file();
 	} elsif ( glob("/etc/ssl/certs/*.pem") ) {

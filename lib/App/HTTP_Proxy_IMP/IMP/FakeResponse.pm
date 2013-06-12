@@ -3,17 +3,18 @@ use strict;
 use warnings;
 package App::HTTP_Proxy_IMP::IMP::FakeResponse;
 use base 'Net::IMP::HTTP::Request';
-use fields qw(root ignore response);
+use fields qw(root file response);
 
 use Net::IMP;
 use Net::IMP::Debug;
 use Carp;
+use Digest::MD5;
 
 sub RTYPES { ( IMP_PASS,IMP_REPLACE,IMP_DENY,IMP_ACCTFIELD ) }
 
 sub new_factory {
     my ($class,%args) = @_;
-    my $dir = delete $args{root} or croak("no root directory given");
+    my $dir = $args{root} or croak("no root directory given");
     -d $dir && -r _ && -x _ or croak("cannot use base dir $dir: $!");
     my $obj = $class->SUPER::new_factory(%args);
     $obj->{root} = $dir;
@@ -23,6 +24,7 @@ sub new_factory {
 sub validate_cfg {
     my ($class,%args) = @_;
     my $dir = delete $args{root};
+    delete $args{ignore_parameters};
     my @err = $class->SUPER::validate_cfg(%args);
     if ( ! $dir ) {
 	push @err, "no 'root' given";
@@ -34,76 +36,163 @@ sub validate_cfg {
 
 sub request_hdr {
     my ($self,$hdr) = @_;
-    my $len = length($hdr) or return;
 
-    my ($page) = $hdr =~m{\A\w+ +(\S+)};
-    $page =~s{\?.*}{}; # strip query string
-    my $host = $page =~s{^\w+://([^/]+)}{} && $1;
+    my ($method,$proto,$host,$path) = $hdr =~m{\A([A-Z]+) +(?:(\w+)://([^/]+))?(\S+)};
+    $host = $1 if $hdr =~m{\nHost: *(\S+)}i;
     if ( ! $host ) {
-	($host) = $hdr =~m{\nHost: *(\S+)}i or do {
-	    $self->run_callback([ IMP_DENY,0,"cannot determine URI host"]);
-	    return;
-	};
+	$self->run_callback([IMP_DENY,0,'cannot determine host']);
+	return;
     }
-    my $port = $host=~s{^(?:\[(\w._\-:)+\]|(\w._\-))(?::(\d+))?$}{ $1 || $2 }e ? $3:80;
+    $proto ||= 'http';
+    $host = lc($host);
+    my $port =
+        $host=~s{^(?:\[(\w._\-:)+\]|(\w._\-))(?::(\d+))?$}{ $1 || $2 }e ?
+        $3:80;
 
-    my $dir = $self->{factory_args}{root};
-    my $fh;
-    for ( "$dir/$host:$port/$page", "$dir/$host/$page" ) {
-	$_ .= "INDEX.html" if m{/$};
-	-f $_ && -r _ or next;
-	open($fh,'<',$_) or next;
+    my $dir = $self->{factory_args}{root}."/$host:$port";
+    goto IGNORE if ! -d $dir;
+
+    my $uri = "$proto://$host:$port$path";
+    my $qstring = $path =~s{\?(.+)}{} ? $1 : undef;
+    # collect information to determine filename
+    my %file = (
+	uri => $uri,
+        dir => $dir,
+        method => $method,
+        md5path => Digest::MD5->new->add($path)->hexdigest,
+        md5data => undef,
+    );
+
+    my $fname = "$dir/".lc($method)."-".$file{md5path};
+    goto TRY_FNAME if $self->{factory_args}{ignore_parameters};
+
+    ( $file{md5data} = Digest::MD5->new )->add("\000$qstring\001")
+        if defined $qstring;
+    if ( $method ~~ [ 'GET','HEAD' ] ) {
+	$fname .= "-".$file{md5data}->hexdigest if $file{md5data};
+	goto TRY_FNAME;
     }
 
-    if ( ! $fh ) {
-	# pass thru
-	debug("no hijack http://$host:$port$page");
-	$self->{ignore} = 1;
+    # ignore if there will not be a matching filename, no matter
+    # what md5data will be
+    goto IGNORE if ! -f $fname and ! glob("$fname-*");
+
+    # don't pass yet, continue in request body
+    $file{rqhdr} = $hdr; 
+    $self->{file} = \%file;
+    return; 
+
+    TRY_FNAME:
+    if ( $self->{response} = _extract_response($fname)) {
+	$hdr =~s{(\A\w+\s+)}{$1internal://};
+	debug("hijack http://$host:$port$path");
 	$self->run_callback( 
-	    # pass thru everything 
-	    [ IMP_PASS,0,IMP_MAXOFFSET ], 
-	    [ IMP_PASS,1,IMP_MAXOFFSET ], 
+	    [ IMP_ACCTFIELD,'orig_uri',$uri ],
+	    [ IMP_REPLACE,0,$self->offset(0),$hdr ],
+	    [ IMP_PASS,0,IMP_MAXOFFSET ]
 	);
 	return;
     }
 
-    $self->{response} = do { local $/; <$fh>; };
-	
-    $hdr =~s{(\A\w+\s+)}{$1internal://};
-    debug("hijack http://$host:$port$page");
-    $self->run_callback(
-	[ IMP_ACCTFIELD,'orig_uri',"http://$host:$port$page" ],
-	[ IMP_REPLACE,0,$len,$hdr ],
-	[ IMP_PASS,0,IMP_MAXOFFSET ]
+    IGNORE:
+    $self->run_callback( 
+	[ IMP_PASS,0,IMP_MAXOFFSET ],
+	[ IMP_PASS,1,IMP_MAXOFFSET ],
     );
 }
 
+sub request_body {
+    my ($self,$data) = @_;
+    my $f = $self->{file} or return;
+    my $md = $f->{md5data};
+    if ( $data ne '' ) {
+	$md ||= $f->{md5data} = Digest::MD5->new;
+        $md->add($data);
+        return;
+    }
+
+    # eof of request body - determine final filename
+    $self->{file} = undef;
+    my $fname = $f->{dir}.'/'.join('-',
+	lc($f->{method}),
+	$f->{md5path},
+	$f->{md5data} ? ($f->{md5data}->hexdigest):()
+    );
+
+    # setup response if file is found
+    if ( $self->{response} = _extract_response($fname)) {
+	( my $hdr = $f->{rqhdr})=~s{(\A\w+\s+)}{$1internal://};
+	debug("hijack $f->{uri}");
+	$self->run_callback( 
+	    [ IMP_ACCTFIELD,'orig_uri',$f->{uri} ],
+	    [ IMP_REPLACE,0,length($f->{rqhdr}),$hdr ],
+	    [ IMP_PASS,0,IMP_MAXOFFSET ]
+	);
+	return;
+    }
+
+    # otherwise pass everything through
+    $self->run_callback( 
+	[ IMP_PASS,0,IMP_MAXOFFSET ],
+	[ IMP_PASS,1,IMP_MAXOFFSET ],
+    );
+}
+
+
 sub response_hdr {
     my ($self,$hdr) = @_;
-    $self->{ignore} and return;
-    my $len = length($hdr);
-    my $rphdr = $self->{response} =~s{^(.*?(\r?)\n\2\n)}{}s && $1;
+    my $rphdr = $self->{response} && $self->{response}[0] or return;
     $rphdr =~s{\r?\n}{\r\n}g;
-    $rphdr =~s{(\nContent-length:[ \t]*)\d+}{ $1.length($self->{response}) }e;
-    $self->run_callback([ IMP_REPLACE,1,$len,$rphdr ]);
+    my $clen = length($self->{response}[1]);
+    $rphdr =~s{(\nContent-length:[ \t]*)\d+}{$1$clen} or 
+	$rphdr =~s{\n}{\nContent-length: $clen\r\n};
+    warn "XXXX offset=".$self->offset(1)." len=".length($hdr);
+    $self->run_callback([ IMP_REPLACE,1,$self->offset(1),$rphdr ]);
 }
 
 sub response_body {
     my ($self,$data) = @_;
-    $self->{ignore} and return;
-    if ( $data ne '' ) {
-	debug("replace data up to offset=%d", $self->offset(1) );
-	$self->run_callback(
-	    [ IMP_REPLACE,1,$self->offset(1),$self->{response} ],
-	    [ IMP_PASS,1,IMP_MAXOFFSET ],
-	);
-	$self->{ignore} = 1;
-    }
+    my $rp = $self->{response} or return;
+    $self->{response} = undef;
+    warn "XXXX offset=".$self->offset(1)." len=".length($data);
+    $self->run_callback(
+	[ IMP_REPLACE,1,$self->offset(1),$rp->[1] ],
+	[ IMP_PASS,1,IMP_MAXOFFSET ],
+    );
 }
 
-# will not be called
-sub request_body {}
-sub any_data {}
+sub any_data {
+    my $self = shift;
+    # ignore
+    $self->{file} or return;
+    $self->{file} = undef;
+    $self->run_callback(
+	[ IMP_PASS,0,IMP_MAXOFFSET ],
+	[ IMP_PASS,1,IMP_MAXOFFSET ],
+    );
+}
+
+sub _extract_response {
+    my $fname = shift;
+    open( my $fh,'<',$fname) or return;
+    my $data = do { local $/; <$fh> };
+    if ( $data =~s{\A(HTTP/1\.[01] .*?(\r?\n)\2)}{}s ) {
+	# only response header + body
+	return [ $1,$data ];
+    } else {
+	my @size = unpack("NNNN",substr($data,-16));
+	if ( $size[0]+$size[1]+$size[2]+$size[3] + 16 == length($data)) {
+	    # format used by Net::IMP::HTTP::SaveResponse
+	    my $rq = $size[0]+$size[1]; # skip request
+	    return [
+		substr($data,$rq,$size[2]),          # response header
+		substr($data,$rq+$size[2],$size[3])  # response body
+	    ],
+	}
+    }
+    debug("unknown format in $fname");
+    return;
+}
 
 1;
 
@@ -133,22 +222,23 @@ response header and body into the data stream, instead of contacting the
 original server.
 This dummy response is than replaced with the alternative response.
 
-The module has a single argument C<root> for C<new_analyzer>. 
-C<root> specifies the base directory, where the alternative responses are
+The format and file name for the alternative responses is the same as in 
+L<Net::IMP::HTTP::SaveResponse>, see there for details.
+
+C<new_analyzer> has the following arguments:
+
+=over 4
+
+=item root
+
+Specifies the base directory, where the alternative responses are
 located. 
-When getting a request for http://host:port/page it will search inside C<root>
-for a file named either C<host:port/page> or C<host/page> and return this as
-response.
-The query string part of the URI will be ignored when looking for the on disk
-representation.
-If the page ends with a C</> C<INDEX.html> will be added when searching for
-the data.
 
-The response file should include HTTP header and body, any Content-length header
-will be corrected to have the correct value for the response body.
+=item ignore_parameters
 
-This module works in concert with L<Net::IMP::HTTP::SaveResponse>, e.g. data
-saved with L<Net::IMP::HTTP::SaveResponse> will be found by this module.
+Ignore query string or post data when computing the file name.
+
+=back
 
 =head1 AUTHOR
 
