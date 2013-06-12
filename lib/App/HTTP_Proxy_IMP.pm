@@ -5,7 +5,7 @@ use warnings;
 package  App::HTTP_Proxy_IMP;
 use fields qw(addr impns filter pcapdir mitm_ca capath no_check_certificate);
 
-use App::HTTP_Proxy_IMP::IMP '$IMP_MAX_IN_ANALYZER';
+use App::HTTP_Proxy_IMP::IMP;
 use App::HTTP_Proxy_IMP::Conn;
 use App::HTTP_Proxy_IMP::Request;
 use App::HTTP_Proxy_IMP::Relay;
@@ -18,7 +18,7 @@ use IO::Socket::SSL::Intercept;
 use IO::Socket::SSL::Utils;
 use Carp 'croak';
 
-our $VERSION = '0.948';
+our $VERSION = '0.949';
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -289,7 +289,6 @@ sub getoptions {
 	'T|trace=s' => sub { 
 	    $TRACE{$_} = 1 for split(m/,/,$_[1]) 
 	},
-	'max-in-analyzer=i' => \$IMP_MAX_IN_ANALYZER,
     );
 
     my @addr = @ARGV;
@@ -332,10 +331,6 @@ Options:
 		   full name.
 		   Defaults to App::HTTP_Proxy_IMP, Net::IMP
 
-  --max-in-analyzer L   set limit, on how many bytes may be send to IMP
-                   analyzer w/o getting feedback from analyzer, default 2^20.
-		   Set to 0 for unlimited
-  
   # options intended for development and debugging:
   -P|--pcapdir D   save connections as pcap files into D, needs Net::PcapWriter
   -d|--debug [RX]  debug mode, if RX is given restricts debugging to packages

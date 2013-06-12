@@ -1,3 +1,7 @@
+0.949 2013-06-12
+- remove max-in-analyzer option and related code in IMP.pm.
+  Instead the IMP_PAUSE|IMP_CONTINUE interface is supported so that an 
+  analyzer itself can control flow
 0.948 2013-06-12
 - only try to determine CApath if mitm_ca is given
 0.947 2013-06-04

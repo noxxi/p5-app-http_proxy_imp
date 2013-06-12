@@ -12,13 +12,6 @@ use Hash::Util 'lock_ref_keys';
 use Compress::Raw::Zlib;
 use Carp;
 
-use base 'Exporter';
-our @EXPORT_OK = qw($IMP_MAX_IN_ANALYZER);
-
-# if more than IMP_MAX_IN_ANALYZER are in the ibuf we will stop receiving
-# data and wait until callbacks decrease size of ibuf again
-our $IMP_MAX_IN_ANALYZER = 2**20;
-
 my %METHODS_RFC2616 = map { ($_,1) } qw( GET HEAD POST PUT DELETE OPTIONS CONNECT TRACE );
 my %METHODS_WITHOUT_RQBODY = map { ($_,1) } qw( GET HEAD DELETE CONNECT );
 my %METHODS_WITH_RQBODY = map { ($_,1) } qw( POST PUT );
@@ -36,6 +29,8 @@ my $interface = [
 	IMP_DENY,
 	IMP_LOG,
 	IMP_ACCTFIELD,
+	IMP_PAUSE,
+	IMP_CONTINUE,
     ]
 ];
 
@@ -123,7 +118,6 @@ sub new_analyzer {
 	pass => [0,0],      # pass allowed up to given offset (per dir)
 	prepass => [0,0],   # prepass allowed up to given offset (per dir)
 	fixup_header => [], # sub to fixup content-length in header once known
-	stalled => [0,0],   # too much data in ibuf?
 	eof => [0,0],       # got eof in dir ?
 	decode => undef,    # decoder for content-encoding decode{type}[dir]
 	pass_encoded => undef, # pass body encoded (analyzer will not change body)
@@ -737,6 +731,13 @@ sub _imp_callback {
 
 	    next;
 	}
+        if ( $rtype ~~ [ IMP_PAUSE, IMP_CONTINUE ] ) {
+	    my $dir = shift;
+	    my $relay = $self->{request}{conn}{relay};
+	    if ( $relay and my $fo = $relay->fd($dir)) {
+		$fo->mask( r => ($rtype == IMP_PAUSE ? 0:1));
+	    }
+	}
 
 	return $request->fatal("unsupported IMP return type: $rtype");
     }
@@ -748,43 +749,6 @@ sub _imp_callback {
 	    #warn Dumper($fw); use Data::Dumper;
 	    my ($changed,$data,$callback,$args) = @$fw;
 	    $callback->($self,$data,$changed,$args);
-	}
-	# unstall ?
-	_check_stalled($self,$dir) if $self->{stalled}[$dir];
-    }
-}
-
-############################################################################
-# IMP specific stalled handling
-# if more than IMP_MAX_IN_ANALYZER are in the ibuf we will stop receiving
-# data and wait until callbacks decrease size of ibuf again
-############################################################################
-sub _check_stalled {
-    my ($self,$dir) = @_;
-    my $ibuf = $self->{ibuf}[$dir];
-    my $size = $ibuf->[-1][0] + length($ibuf->[-1][1]) - $ibuf->[0][0];
-
-    if ( $IMP_MAX_IN_ANALYZER ) {
-	if ( $size  > $IMP_MAX_IN_ANALYZER ) {
-	    return if $self->{stalled}[$dir];   # no change - still stalled
-	    # set stalled and disable fd
-	    $self->{stalled}[$dir] = 1;
-	    $DEBUG && $self->{request}->xdebug(
-		"max in analyzer reached - set $dir to stalled");
-	    my $relay = $self->{request}{conn}{relay} or return;
-	    if ( my $fo = $relay->fd($dir)) {
-		$fo->mask( r => 0 );
-	    }
-	} else {
-	    return if ! $self->{stalled}[$dir]; # no change - still not stalled
-	    # set unstalled and enable fd
-	    $DEBUG && $self->{request}->xdebug(
-		"below max in analyzer - unstall $dir");
-	    $self->{stalled}[$dir] = 0;
-	    my $relay = $self->{request}{conn}{relay} or return;
-	    if ( my $fo = $relay->fd($dir)) {
-		$fo->mask( r => 1 );
-	    }
 	}
     }
 }
@@ -935,7 +899,6 @@ sub _imp_data {
     }
     $DEBUG && $self->{request}->xdebug( "ibuf.length=%d", 
 	$ibuf->[-1][0] + length($ibuf->[-1][1]) - $ibuf->[0][0]);
-    _check_stalled($self,$dir) if ! $self->{stalled}[$dir];
 
     SEND2IMP:
     $DEBUG && $self->{request}->xdebug("forward(%d) %d bytes type=%s off=%d to analyzer",
