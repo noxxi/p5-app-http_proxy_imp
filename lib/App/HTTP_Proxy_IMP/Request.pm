@@ -462,7 +462,7 @@ sub _request_body_after_imp {
 ############################################################################
 sub in_response_header {
     my ($self,$hdr,$time,$xhdr) = @_;
-    return if $xhdr->{code} < 200; # ignore preliminary response
+    return if $xhdr->{code} == 100; # ignore preliminary response
 
     if ( my $imp = $self->{imp_analyzer} ) {
 	my $debug = $DEBUG && debug_context( id => $self->id);

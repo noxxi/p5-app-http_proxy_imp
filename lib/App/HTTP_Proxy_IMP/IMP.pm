@@ -352,7 +352,7 @@ sub _response_header_imp {
     # - don't specify content-length and close request with connection close
 
     # we don't change $hdr here because it will be rebuild from fields anyway
-    if ( $CODE_WITHOUT_RPBODY{$xhdr->{code}} ) {
+    if ( $CODE_WITHOUT_RPBODY{$xhdr->{code}} or $xhdr->{code} < 200 ) {
 	$xhdr->{content_length} = 0;
 	# better remove them
 	delete @{ $xhdr->{fields} }{ qw/ content-length transfer-encoding / };
