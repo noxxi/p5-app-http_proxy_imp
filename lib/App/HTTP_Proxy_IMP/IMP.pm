@@ -56,7 +56,9 @@ sub new_factory {
 	my %args = $mod->str2cfg($args//'');
 	my $factory = $mod->new_factory(%args) 
 	    or croak("cannot create Net::IMP factory for $mod");
-	$factory = $factory->set_interface( $interface )
+	$factory = 
+	    $factory->get_interface( $interface ) &&
+	    $factory->set_interface( $interface )
 	    or croak("$mod does not implement the interface supported by us");
 	push @factory,$factory;
     }
@@ -67,11 +69,11 @@ sub new_factory {
 	require Net::IMP::Cascade;
 	my $cascade = Net::IMP::Cascade->new_factory( parts => [ @factory ]) 
 	    or croak("cannot create Net::IMP::Cascade factory");
+	$cascade = $cascade->set_interface( $interface ) or 
+	    croak("cascade does not implement the interface supported by us");
 	@factory = $cascade;
     }
-
-    my $factory = $factory[0]->set_interface( $interface ) or 
-	croak("factory[0] does not implement the interface supported by us");
+    my $factory = $factory[0];
 
     my $self = bless {
 	imp => $factory, # IMP factory object
@@ -80,7 +82,7 @@ sub new_factory {
     lock_ref_keys($self);
 
     # update can_modify
-    CHKIF: for my $if ( $self->{imp}->get_interface ) {
+    CHKIF: for my $if ( $factory->get_interface ) {
 	my ($dt,$rt) = @$if;
 	for (@$rt) {
 	    $_ ~~ [ IMP_REPLACE, IMP_TOSENDER ] or next;

@@ -18,7 +18,7 @@ use IO::Socket::SSL::Intercept;
 use IO::Socket::SSL::Utils;
 use Carp 'croak';
 
-our $VERSION = '0.949';
+our $VERSION = '0.950';
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -115,6 +115,7 @@ sub start {
     if ($filter && @$filter ) {
 	my $ns = $self->{impns};
 	my @mod;
+	my $ev = App::HTTP_Proxy_IMP::EventLoop->new;
 	for my $f (@$filter) {
 	    if ( ref($f) ) {
 		# already factory object
@@ -137,7 +138,7 @@ sub start {
 	    my %args = $args ? $found->str2cfg($args) :();
 	    my @err = $found->validate_cfg(%args);
 	    die "bad config for $found: @err" if @err;
-	    push @mod, $found->new_factory(%args)
+	    push @mod, $found->new_factory(%args, eventlib => $ev )
 	}
 	$imp_factory = App::HTTP_Proxy_IMP::IMP->new_factory(@mod);
     }
@@ -351,6 +352,58 @@ proxy proxy:8888
 USAGE
     exit(2);
 }
+
+############################################################################
+# AnyEvent wrapper to privide Net::IMP::Remote etc with acccess to
+# IO events
+############################################################################
+package App::HTTP_Proxy_IMP::EventLoop;
+sub new {  bless {},shift }
+{
+    my %watchr;
+    sub onread {
+        my ($self,$fh,$cb) = @_;
+        defined( my $fn = fileno($fh)) or die "invalid filehandle";
+        if ( $cb ) {
+            $watchr{$fn} = AnyEvent->io(
+                fh => $fh,
+                cb => $cb,
+                poll => 'r'
+            );
+        } else {
+            undef $watchr{$fn};
+        }
+    }
+}
+
+{
+    my %watchw;
+    sub onwrite {
+        my ($self,$fh,$cb) = @_;
+        defined( my $fn = fileno($fh)) or die "invalid filehandle";
+        if ( $cb ) {
+            $watchw{$fn} = AnyEvent->io(
+                fh => $fh,
+                cb => $cb,
+                poll => 'w'
+            );
+        } else {
+            undef $watchw{$fn};
+        }
+    }
+}
+
+sub now { return AnyEvent->now }
+sub timer {
+    my ($self,$after,$cb,$interval) = @_;
+    return AnyEvent->timer(
+        after => $after,
+        cb => $cb,
+        $interval ? ( interval => $interval ):()
+    );
+}
+
+
 
 
 1;

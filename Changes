@@ -1,3 +1,7 @@
+0.950 2013-06-21
+- export eventloop to IMP plugins
+- do get_interface before set_interface to make sure caller supports what we
+  want
 0.949 2013-06-12
 - remove max-in-analyzer option and related code in IMP.pm.
   Instead the IMP_PAUSE|IMP_CONTINUE interface is supported so that an 
