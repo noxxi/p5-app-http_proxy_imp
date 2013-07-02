@@ -1,3 +1,8 @@
+0.951 2013-07-02
+- add support for IMP_FATAL
+- fix support of IMP_PAUSE and IMP_CONTINUE
+- fix closing after everything is done - don't close to early if analyzer
+  takes too long (like with remote analyzer)
 0.950 2013-06-21
 - export eventloop to IMP plugins
 - do get_interface before set_interface to make sure caller supports what we

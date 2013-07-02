@@ -125,10 +125,10 @@ sub in_request_header {
 	return;
     }
 
-    $conn->{relay}->acctinfo($self->{acct});
+    my $relay = $conn->{relay} or return;
+    $relay->acctinfo($self->{acct});
     $conn->{spool} = []; # mark connection as processing request
 
-    my $relay = $conn->{relay} or return;
     $DEBUG && $self->xdebug("incoming request header ".$hdr);
 
     $self->{method} = $xhdr->{method};

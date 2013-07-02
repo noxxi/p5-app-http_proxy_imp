@@ -142,7 +142,7 @@ sub forward {
     my ($self,$from,$to,$data) = @_;
     my $fo = $self->{fds}[$to] or return
 	$self->fatal("cannot write to $to - no such fo");
-    $self->xdebug("$to>$from - forward %d bytes",length($data));
+    $self->xdebug("$from>$to - forward %d bytes",length($data));
     $fo->write($data,$from);
 }
 
@@ -218,17 +218,16 @@ sub shutdown:method {
 # - nowhere to write too
 sub closeIfDone {
     my $self = shift;
-    my $sink = my $src = '';
+    my $sink = '';
     for my $fo (@{$self->{fds}}) {
 	$fo && $fo->{fd} or next;
-	$sink .= $fo->{dir} if $fo->{status} & 0b010; # not write-closed
-	$src  .= $fo->{dir} if $fo->{status} & 0b100; # not read-closed
-	return if $fo->{wbuf} ne ''; # still has data to write
+	return if $fo->{rbuf} ne ''; # has unprocessed data
+	return if $fo->{wbuf} ne ''; # has unwritten data
+	$sink .= $fo->{dir} if not $fo->{status} & 0b010; # not write-closed
     }
 
-    if ( $sink eq ''       # nowhere to write
-	or $src eq ''      # nowhere to read from new data
-    ) {
+    if ( $sink eq '' ) {      # nowhere to write
+	$self->xdebug( "close relay because all fd done sink='$sink' ");
 	# close relay
 	return $self->close;
     }
@@ -365,7 +364,10 @@ sub shutdown:method {
 	
     shutdown($self->{fd},$what);
     # shutdown on both sides -> close
-    return $self->close if $self->{status} & 0b110 == 0b110;
+    if (( $self->{status} & 0b110 ) == 0b110 ) {
+	$self->xdebug( "close fn=".fileno($self->{fd})." because status $self->{status} done");
+	return $self->close;
+    }
 
     # if all fd are closed, close the relay too
     $self->{relay}->closeIfDone;

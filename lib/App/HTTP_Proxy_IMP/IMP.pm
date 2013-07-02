@@ -31,6 +31,7 @@ my $interface = [
 	IMP_ACCTFIELD,
 	IMP_PAUSE,
 	IMP_CONTINUE,
+	IMP_FATAL,
     ]
 ];
 
@@ -734,11 +735,17 @@ sub _imp_callback {
 	    next;
 	}
         if ( $rtype ~~ [ IMP_PAUSE, IMP_CONTINUE ] ) {
-	    my $dir = shift;
+	    my $dir = shift(@$rv);
 	    my $relay = $self->{request}{conn}{relay};
 	    if ( $relay and my $fo = $relay->fd($dir)) {
 		$fo->mask( r => ($rtype == IMP_PAUSE ? 0:1));
 	    }
+	    next;
+	}
+
+	if ( $rtype == IMP_FATAL ) {
+	    $request->fatal(shift(@$rv));
+	    next;
 	}
 
 	return $request->fatal("unsupported IMP return type: $rtype");
