@@ -1,3 +1,5 @@
+0.952 2013-07-04
+- option -l|--log [rx] to adjust displaying of log messages
 0.951 2013-07-02
 - add support for IMP_FATAL
 - fix support of IMP_PAUSE and IMP_CONTINUE

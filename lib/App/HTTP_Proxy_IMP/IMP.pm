@@ -41,9 +41,9 @@ sub can_modify {
 
 # create a new factory object
 sub new_factory {
-    my ($class,@mod) = @_;
+    my ($class,%args) = @_;
     my @factory;
-    for my $module (@mod) {
+    for my $module (@{ delete $args{mod} || [] }) {
 	if ( ref($module)) {
 	    # assume it is already an IMP factory object
 	    push @factory, $module;
@@ -77,6 +77,7 @@ sub new_factory {
     my $factory = $factory[0];
 
     my $self = bless {
+	%args,
 	imp => $factory, # IMP factory object
 	can_modify => 0, # does interface support IMP_REPLACE, IMP_TOSENDER
     }, $class;
@@ -125,6 +126,7 @@ sub new_analyzer {
 	decode => undef,    # decoder for content-encoding decode{type}[dir]
 	pass_encoded => undef, # pass body encoded (analyzer will not change body)
 	method => undef,    # request method
+	logsub => $factory->{logsub},  # how to log IMP_OG
     }, ref($factory);
     lock_ref_keys($self);
     weaken($self->{request});
@@ -543,11 +545,9 @@ sub _imp_callback {
         if ( $rtype == IMP_LOG ) {
             my ($impdir,$offset,$len,$level,$msg) = @$rv;
 	    $DEBUG && $request->xdebug("got log($impdir,$level) $msg");
-            my %args = ( msg => $msg );
-            $args{offset} = $offset if defined $offset;
-            $args{len} = $len if defined $len;
-	    $msg = join(' ',"log[$level]", map { "$_=$args{$_}" } keys %args);
-            $request->xdebug($msg);
+	    if ( my $sub = $self->{logsub} ) {
+		$sub->($level,$msg,$impdir,$offset,$len)
+	    }
 	    next;
 	}
 

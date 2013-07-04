@@ -3,7 +3,7 @@ use strict;
 use warnings;
 
 package  App::HTTP_Proxy_IMP;
-use fields qw(addr impns filter pcapdir mitm_ca capath no_check_certificate);
+use fields qw(addr impns filter logrx pcapdir mitm_ca capath no_check_certificate);
 
 use App::HTTP_Proxy_IMP::IMP;
 use App::HTTP_Proxy_IMP::Conn;
@@ -18,7 +18,7 @@ use IO::Socket::SSL::Intercept;
 use IO::Socket::SSL::Utils;
 use Carp 'croak';
 
-our $VERSION = '0.951';
+our $VERSION = '0.952';
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -140,7 +140,19 @@ sub start {
 	    die "bad config for $found: @err" if @err;
 	    push @mod, $found->new_factory(%args, eventlib => $ev )
 	}
-	$imp_factory = App::HTTP_Proxy_IMP::IMP->new_factory(@mod);
+
+	my $logsub = $self->{logrx} && do {
+	    my $rx = $self->{logrx};
+	    sub {
+		my ($level,$msg,$dir,$off,$len) = @_;
+		$level =~ $rx or return;
+		print STDERR "[$level]($dir:$off,$len) $msg\n";
+	    };
+	};
+	$imp_factory = App::HTTP_Proxy_IMP::IMP->new_factory(
+	    mod => \@mod,
+	    logsub => $logsub,
+	);
     }
 
     my $capath;
@@ -279,6 +291,11 @@ sub getoptions {
 		push @{$self->{impns}}, $_[1]
 	    }
 	},
+	'l|log:s' => sub {
+	    $self->{logrx} = $_[1] 
+		? eval { qr/$_[1]/ } || "bad rx $_[1]" 
+		: qr/./;
+	},
 	'd|debug:s' => sub {
 	    $DEBUG = 1;
 	    if ($_[1]) {
@@ -331,6 +348,8 @@ Options:
 		   Plugins outside these namespace need to be given with 
 		   full name.
 		   Defaults to App::HTTP_Proxy_IMP, Net::IMP
+
+  -l|--log [rx]    print log messages where category matches rx (default all)
 
   # options intended for development and debugging:
   -P|--pcapdir D   save connections as pcap files into D, needs Net::PcapWriter
