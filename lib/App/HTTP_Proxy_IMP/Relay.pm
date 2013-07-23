@@ -214,24 +214,35 @@ sub shutdown:method {
 }
 
 # check for condition, where we cannot transfer anymore data:
-# - nowhere to read
+# - nowhere to read and no open requests
 # - nowhere to write too
 sub closeIfDone {
     my $self = shift;
-    my $sink = '';
+    my $sink = my $drain = '';
     for my $fo (@{$self->{fds}}) {
 	$fo && $fo->{fd} or next;
 	return if $fo->{rbuf} ne ''; # has unprocessed data
 	return if $fo->{wbuf} ne ''; # has unwritten data
-	$sink .= $fo->{dir} if not $fo->{status} & 0b010; # not write-closed
+	$drain .= $fo->{dir} if not $fo->{status} & 0b100; # not read-closed
+	$sink  .= $fo->{dir} if not $fo->{status} & 0b010; # not write-closed
     }
 
     if ( $sink eq '' ) {      # nowhere to write
-	$self->xdebug( "close relay because all fd done sink='$sink' ");
+	$DEBUG && $self->xdebug( "close relay because all fd done sink='$sink' ");
 	# close relay
 	return $self->close;
     }
 
+    if ( $drain ne '01' ) {  # no reading from both sides
+	my $conn = $self->{conn};
+	if ( ! $conn or ! $conn->open_requests ) {
+	    # close relay
+	    $DEBUG && $self->xdebug( "close relay because nothing to read and all done");
+	    return $self->close;
+	}
+    }
+
+    $DEBUG && $self->xdebug("drain=$drain sink=$sink rq=".$self->{conn}->open_requests." - keeping open");
     return;
 }
 
@@ -348,25 +359,30 @@ sub reset {
 # don't shutdown(1) if wbuf ne '' && ! $force
 sub shutdown:method {
     my ($self,$rw,$force) = @_;
-    my $what = $rw eq 'r' ? 0 : $rw eq 'w' ? 1 : $rw;
-    my $stat = $what ? 0b010 : 0b100;
+    my $write = $rw eq 'r' ? 0 : $rw eq 'w' ? 1 : $rw;
+    my $stat = $write ? 0b010 : 0b100;
     return if $self->{status} & $stat && ! $force; # no change
 
-    $self->xdebug("shutdown $rw fn=".fileno($self->{fd}));
-
     $self->{status} |= $stat;
-    if ( $rw && $self->{wbuf} ne '' ) {
+    if ( $write && $self->{wbuf} ne '' ) {
+	$self->xdebug("called shutdown $rw fn=".fileno($self->{fd}).
+	    " wbuf.len=".length($self->{wbuf}));
 	return if ! $force; # will shutdown once all is written
 	$self->{wbuf} = ''; # drop rest
 	undef $self->{wsrc}; # don't re-enable, unclear state
 	undef $self->{wwatch};
     }
 	
-    shutdown($self->{fd},$what);
+    $self->xdebug("shutdown $rw fn=".fileno($self->{fd}));
+    shutdown($self->{fd},$write);
     # shutdown on both sides -> close
     if (( $self->{status} & 0b110 ) == 0b110 ) {
 	$self->xdebug( "close fn=".fileno($self->{fd})." because status $self->{status} done");
-	return $self->close;
+	$self->close;
+    } elsif ( $write ) {
+	undef $self->{wwatch};
+    } else {
+	undef $self->{rwatch};
     }
 
     # if all fd are closed, close the relay too

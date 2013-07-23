@@ -1,3 +1,5 @@
+0.953 2013-07-23
+- fixes for endless loop or late close on end of data
 0.952 2013-07-04
 - option -l|--log [rx] to adjust displaying of log messages
 0.951 2013-07-02
