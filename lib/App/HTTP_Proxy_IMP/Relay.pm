@@ -251,14 +251,16 @@ sub closeIfDone {
 sub dump_state {
     my $self = shift;
     my $conn = $self->{conn};
+    my $msg = '';
     if ( my $fds = $self->{fds} ) {
         my @st;
         for( my $i=0;$i<@$fds;$i++) {
             push @st, sprintf("%d=%03b",$i,$fds->[$i]{status} || 0);
         }
-        $conn->xdebug("status @st");
     }
-    $conn->dump_state();
+    $msg .= $conn->dump_state();
+    return $msg if defined wantarray;
+    debug($msg);
 }
 
 

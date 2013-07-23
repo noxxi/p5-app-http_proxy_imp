@@ -3,7 +3,7 @@ use strict;
 use warnings;
 
 package  App::HTTP_Proxy_IMP;
-use fields qw(addr impns filter logrx pcapdir mitm_ca capath no_check_certificate);
+use fields qw(addr impns filter logrx pcapdir mitm_ca capath no_check_certificate childs);
 
 use App::HTTP_Proxy_IMP::IMP;
 use App::HTTP_Proxy_IMP::Conn;
@@ -18,7 +18,7 @@ use IO::Socket::SSL::Intercept;
 use IO::Socket::SSL::Utils;
 use Carp 'croak';
 
-our $VERSION = '0.953';
+our $VERSION = '0.954';
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -155,6 +155,10 @@ sub start {
 	);
     }
 
+    if ( $self->{childs} ) {
+	$self->{childs} = [ map { undef } (1..$self->{childs}) ];
+    }
+
     my $capath;
     if ( ! $mitm ) {
 	# no interception = no certificate checking
@@ -220,31 +224,14 @@ sub start {
 	debug("listening on $addr");
     }
 
-    # on SIGUSR1 dump state of all relays
-    my $usr1 = AnyEvent->signal( signal => 'USR1', cb => sub {
-	# temporaly enable debugging, even if off
-	my $od = $DEBUG;
-	$DEBUG = 1;
-	debug("-------- active relays ------------------");
-	my @relays = App::HTTP_Proxy_IMP::Relay->relays;
-	debug(" * NO RELAYS") if ! @relays;
-	$_->dump_state for(@relays);
-	debug("-----------------------------------------");
-	$DEBUG = $od;
-    });
-
-    my $usr2 = AnyEvent->signal( signal => 'USR2', cb => sub {
-	if ( $DEBUG ) {
-	    debug("disable debugging");
-	    $DEBUG = 0;
-	} else {
-	    $DEBUG = 1;
-	    debug("enable debugging");
-	}
-    });
-
     return 1 if defined wantarray;
     $self->loop;
+}
+
+sub DESTROY {
+    my $self = shift;
+    my $ch = delete $self->{childs} or return;
+    kill 9, grep { $_ } @$ch;
 }
 
 {
@@ -256,12 +243,86 @@ sub start {
 	$loop->send if $loop;
     }
     sub loop {
-	shift;
-	# enter Mainloop myself
+	my $self = shift;
+	return $self->parent_loop if $self->{childs};
+
+	my $usr2 = AnyEvent->signal( signal => 'USR2', cb => sub {
+	    my $was_debug = $DEBUG;
+	    $DEBUG = 1;
+	    debug("($$) ".( $was_debug ? 'disable':'enable' ) ."  debugging");
+	    $DEBUG = ! $was_debug;
+	});
+
+	# on SIGUSR1 dump state of all relays
+	my $usr1 = AnyEvent->signal( signal => 'USR1', cb => sub {
+	    # temporaly enable debugging, even if off
+	    my $msg = "-------- active relays ------------------\n";
+	    my @relays = App::HTTP_Proxy_IMP::Relay->relays;
+	    if ( ! @relays ) {
+		$msg .= " * NO RELAYS\n"
+	    } else {
+		$msg .= $_->dump_state for(@relays);
+	    }
+	    $msg .= "-------- active relays ------------------\n";
+	    my $od = $DEBUG;
+	    $DEBUG = 1;
+	    debug($msg);
+	    $DEBUG = $od;
+	});
+
 	while (1) {
 	    shift(@once)->() while (@once);
 	    $loop = AnyEvent->condvar;
 	    $loop->recv;
+	}
+    }
+
+    # parent mainloop: keep children running
+    sub parent_loop {
+	my $self = shift;
+	$DEBUG && debug("parent $$");
+
+	$SIG{USR1} = sub {
+	    my @pid = grep { $_ } @{$self->{childs}} or return;
+	    debug("propagating USR1 to @pid");
+	    kill 'USR1', @pid;
+	};
+
+	$SIG{USR2} = sub {
+	    my @pid = grep { $_ } @{$self->{childs}} or return;
+	    my $was_debug = $DEBUG;
+	    $DEBUG = 1;
+	    debug("propagating USR2 to @pid");
+	    kill 'USR2', @pid;
+	    $DEBUG = ! $was_debug;
+	};
+
+	while ( my $ch = $self->{childs} ) {
+	    # check if anything needs to be started
+	    for(@$ch) {
+		$_ and next; # child is up
+		# start new child
+		defined( my $pid = fork()) or do {
+		    warn "fork failed: $!";
+		    sleep(1);
+		    next;
+		};
+		if ( $pid == 0 ) {
+		    # child
+		    $0 = "[child] $0";
+		    $self->{childs} = undef;
+		    return $self->loop;
+		}
+		$_ = $pid;
+		$DEBUG && debug("(re)starting child, pid=$pid");
+	    }
+	    # wait for child exit
+	    my $pid = waitpid(-1,0) or next;
+	    $DEBUG && debug("child $pid exit with code ".($?>>8));
+	    my $ch = $self->{childs} or return;
+	    for(@$ch) {
+		$_ = undef,last if $_ == $pid
+	    }
 	}
     }
 }
@@ -275,6 +336,7 @@ sub getoptions {
 	'mitm-ca=s'   => \$self->{mitm_ca},
 	'capath=s'    => \$self->{capath},
 	'no-check-certificate=s' => \$self->{no_check_certificate},
+	'C|childs=i'  => \$self->{childs},
 	'F|filter=s'  => sub { 
 	    if ($_[1] eq '-') { 
 		# discard all previously defined
@@ -340,6 +402,11 @@ Options:
 		   Tries to use builtin default if not given.
   --no-check-certificate  do not check server certificates when intercepting
                    SSL connections
+
+  -C|--childs N    fork N childs an keep them running, e.g. if one child dies
+                   immediatly fork another one. This way one can spread the load
+		   over multiple processors (N>1) or just make sure, that child
+		   gets restarted on errors (N=1)
 
   -F|--filter F    add named IMP plugin as filter, can be used multiple times
                    with --filter mod=args arguments can be given to the filter

@@ -1,3 +1,7 @@
+0.954 2013-07-23
+- new option -C|--childs to fork children and keep them running.
+  might be used to spread load or to just make sure, that child gets
+  restarted if it crashes
 0.953 2013-07-23
 - fixes for endless loop or late close on end of data
 0.952 2013-07-04
