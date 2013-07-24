@@ -1,3 +1,5 @@
+0.955 2013-07-24
+ new option -M|--maxconn to limit number of connections per child
 0.954 2013-07-23
 - new option -C|--childs to fork children and keep them running.
   might be used to spread load or to just make sure, that child gets

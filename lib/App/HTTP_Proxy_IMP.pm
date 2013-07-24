@@ -3,7 +3,19 @@ use strict;
 use warnings;
 
 package  App::HTTP_Proxy_IMP;
-use fields qw(addr impns filter logrx pcapdir mitm_ca capath no_check_certificate childs);
+our $VERSION = '0.955';
+use fields (
+    'addr',                    # \@addr to listen on
+    'impns',                   # \@namespace for IMP plugins
+    'filter',                  # \@plugins to load
+    'logrx',                   # regexp for filtering log messages
+    'pcapdir',                 # dir to store pcap files of requests
+    'mitm_ca',                 # file containing cert and key of proxy cert
+    'capath',                  # path to CA to verify server cert
+    'no_check_certificate',    # don't check server certificates
+    'childs',                  # use this number of childs ( 0 = don't fork)
+    'max_connect_per_child',   # max number of connections before child exits
+);
 
 use App::HTTP_Proxy_IMP::IMP;
 use App::HTTP_Proxy_IMP::Conn;
@@ -17,8 +29,8 @@ use Net::Inspect::Debug qw(%TRACE);
 use IO::Socket::SSL::Intercept;
 use IO::Socket::SSL::Utils;
 use Carp 'croak';
+use POSIX '_exit';
 
-our $VERSION = '0.954';
 
 # try IPv6 using IO::Socket::IP or IO::Socket::INET6
 # fallback to IPv4 only
@@ -190,6 +202,7 @@ sub start {
 
     # create listeners
     my @listen;
+
     $self->{addr} = [ $self->{addr} ] 
 	if $self->{addr} && ref($self->{addr}) ne 'ARRAY';
     for my $spec (@{$self->{addr}}) {
@@ -218,11 +231,28 @@ sub start {
 	    cb => sub {
 		my $cl = $srv->accept or return;
 		debug("new request from %s:%s on %s",$cl->peerhost,$cl->peerport,$addr);
+		if ( $self->{max_connect_per_child}>0 
+		    and 0 == --$self->{max_connect_per_child} ) {
+		    # last connection for child
+		    # fork-away and handle outstanding connections, parent will
+		    # in the meantime fork a replacement child
+		    defined( my $pid = fork()) or die "failed to fork: $!";
+		    if ( $pid ) {
+			$DEBUG && debug("forked away child $$ as $pid");
+			_exit(0);
+		    } else {
+			undef @listen; # only handle outstanding connections
+			$DEBUG && debug(
+			    "forked away child $$ to handle last connections");
+		    }
+		}
 		App::HTTP_Proxy_IMP::Relay->new($cl,$upstream,$conn);
 	    }
 	);
 	debug("listening on $addr");
     }
+
+    $self->{max_connect_per_child} = 0 if ! $self->{childs};
 
     return 1 if defined wantarray;
     $self->loop;
@@ -337,6 +367,7 @@ sub getoptions {
 	'capath=s'    => \$self->{capath},
 	'no-check-certificate=s' => \$self->{no_check_certificate},
 	'C|childs=i'  => \$self->{childs},
+	'M|maxconn=i' => \$self->{max_connect_per_child},
 	'F|filter=s'  => sub { 
 	    if ($_[1] eq '-') { 
 		# discard all previously defined
@@ -407,6 +438,7 @@ Options:
                    immediatly fork another one. This way one can spread the load
 		   over multiple processors (N>1) or just make sure, that child
 		   gets restarted on errors (N=1)
+  -M|--maxconn N   child will exit (and gets restarted) after N connections
 
   -F|--filter F    add named IMP plugin as filter, can be used multiple times
                    with --filter mod=args arguments can be given to the filter
@@ -617,6 +649,20 @@ exiting.
 =item no_check_certificate
 
 If true disables checking of SSL certificates when doing SSL interception.
+
+=item childs N
+
+If N>0 it will fork N children to handle the requests.
+Whenever a child exits it will be restarted immediatly.
+This can be used to spread the load over multiple processors or to keep the
+proxy running, even if a child crashed.
+
+=item max_connect_per_child N | --maxconn N option
+
+If N>0 the child will fork itself after N connections to handle the unfinished
+connections. The parent will immediatly restart the child.
+If options childs is not greater than 0 this option will be ignored.
+This option is useful if the childs are leaking memory due to bad IMP plugins.
 
 =back
 
