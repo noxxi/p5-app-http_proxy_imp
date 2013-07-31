@@ -3,7 +3,7 @@ use strict;
 use warnings;
 
 package  App::HTTP_Proxy_IMP;
-our $VERSION = '0.955';
+our $VERSION = '0.956';
 use fields (
     'addr',                    # \@addr to listen on
     'impns',                   # \@namespace for IMP plugins
@@ -23,8 +23,7 @@ use App::HTTP_Proxy_IMP::Request;
 use App::HTTP_Proxy_IMP::Relay;
 use AnyEvent;
 use Getopt::Long qw(:config posix_default bundling);
-use App::HTTP_Proxy_IMP::Debug ();
-use Net::IMP::Debug qw(debug $DEBUG $DEBUG_RX);
+use App::HTTP_Proxy_IMP::Debug qw(debug $DEBUG $DEBUG_RX);
 use Net::Inspect::Debug qw(%TRACE);
 use IO::Socket::SSL::Intercept;
 use IO::Socket::SSL::Utils;
@@ -241,7 +240,9 @@ sub start {
 			$DEBUG && debug("forked away child $$ as $pid");
 			_exit(0);
 		    } else {
+			$0 =~s{\Q[worker]}{[death-trip]};
 			undef @listen; # only handle outstanding connections
+			App::HTTP_Proxy_IMP::Relay->exit_if_no_relays(1);
 			$DEBUG && debug(
 			    "forked away child $$ to handle last connections");
 		    }
@@ -260,7 +261,7 @@ sub start {
 
 sub DESTROY {
     my $self = shift;
-    my $ch = delete $self->{childs} or return;
+    ref(my $ch = delete $self->{childs}) or return;
     kill 9, grep { $_ } @$ch;
 }
 
@@ -291,7 +292,7 @@ sub DESTROY {
 	    if ( ! @relays ) {
 		$msg .= " * NO RELAYS\n"
 	    } else {
-		$msg .= $_->dump_state for(@relays);
+		$msg .= $_->dump_state."\n" for(@relays);
 	    }
 	    $msg .= "-------- active relays ------------------\n";
 	    my $od = $DEBUG;
@@ -339,7 +340,7 @@ sub DESTROY {
 		};
 		if ( $pid == 0 ) {
 		    # child
-		    $0 = "[child] $0";
+		    $0 = "[worker] $0";
 		    $self->{childs} = undef;
 		    return $self->loop;
 		}

@@ -1,5 +1,9 @@
+0.956 2013-07-31
+- fixed bug that children, which got forked because maxconn was reached, did
+  not exit after all requests were done.
+- better output when dumping state (eg kill -USR1..)
 0.955 2013-07-24
- new option -M|--maxconn to limit number of connections per child
+- new option -M|--maxconn to limit number of connections per child
 0.954 2013-07-23
 - new option -C|--childs to fork children and keep them running.
   might be used to spread load or to just make sure, that child gets

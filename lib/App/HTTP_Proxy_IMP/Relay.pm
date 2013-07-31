@@ -12,6 +12,11 @@ use App::HTTP_Proxy_IMP::Debug;
 use Scalar::Util 'weaken';
 use IO::Socket::SSL;
 use AnyEvent;
+use POSIX '_exit';
+
+# set if the child should destroy itself after last connection closed
+my $exit_if_no_relays;
+sub exit_if_no_relays { $exit_if_no_relays = pop; }
 
 # active relay, inserted in new, removed in $idlet timer
 my @relays;
@@ -52,6 +57,11 @@ sub DESTROY {
     my $self = shift;
     $self->account('destroy');
     $self->xdebug("destroy relay $self");
+    if ( $exit_if_no_relays && ! $self->relays ) {
+	# der letzte macht das Licht aus
+	debug("exit child $$ after last connection");
+	_exit(0)
+    }
 }
 
 sub acctinfo {
@@ -257,8 +267,9 @@ sub dump_state {
         for( my $i=0;$i<@$fds;$i++) {
             push @st, sprintf("%d=%03b",$i,$fds->[$i]{status} || 0);
         }
+	$msg .= " fd:".join(',',@st);
     }
-    $msg .= $conn->dump_state();
+    $msg = $conn->dump_state().$msg;
     return $msg if defined wantarray;
     debug($msg);
 }
@@ -271,8 +282,19 @@ my $idlet = AnyEvent->timer(
         #debug("check timeouts for %d conn",+@relays);
         my $now = AnyEvent->now;
 	RELAY: for my $r (@relays) {
+	    # timeout depends on the state of the relay and child
+	    # if there are active requests set it to 60, if not (e.g.
+	    # idle keep-alive connections) to 30. If this is a forked
+	    # child with no listener which should close after all
+	    # requests are done close idle keep-alive connections faster,
+	    # e.g. set timeout to 1
+	    my $idle = ! $r->{conn}->open_requests;
+	    my $timeout = 
+		! $idle ? 60 :
+		$exit_if_no_relays ? 1 :
+		30;
 	    for my $fo (@{$r->{fds}}) {
-		next RELAY if $_->{didit} + 30 > $now;
+		next RELAY if $_->{didit} + $timeout > $now;
 	    }
 	    $r->xdebug("close because of timeout");
             $r->close
