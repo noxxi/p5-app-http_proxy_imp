@@ -16,3 +16,6 @@ README
 t/01_load.t
 t/02_leak.t
 TODO
+examples/DelayRequest.pm
+examples/ReplaceUA.pm
+
