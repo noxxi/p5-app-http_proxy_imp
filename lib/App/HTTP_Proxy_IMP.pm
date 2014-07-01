@@ -404,6 +404,7 @@ sub getoptions {
     );
 
     my @addr = @ARGV;
+    $self->{logrx} //= qr/./;
     $self->{addr} or @addr or usage("no listener given");
     $self->{addr} = \@addr;
     1;
