@@ -3,7 +3,7 @@ use strict;
 use warnings;
 
 package  App::HTTP_Proxy_IMP;
-our $VERSION = '0.956';
+our $VERSION = '0.957';
 use fields (
     'addr',                    # \@addr to listen on
     'impns',                   # \@namespace for IMP plugins

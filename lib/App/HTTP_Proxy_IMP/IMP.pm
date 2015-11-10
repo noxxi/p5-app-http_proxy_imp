@@ -142,14 +142,15 @@ sub new_analyzer {
 sub request_header {
     my ($self,$hdr,$xhdr,@callback) = @_;
     my $clen = $xhdr->{content_length};
-    if ( ! defined $clen and $xhdr->{method} ne 'CONNECT') {
-	# length not known -> chunking
-	die "FIXME: chunking request body not yet supported";
-    }
 
     # new body might change content-length info in request header
     # need to defer sending header until body length is known
     if ( ! $METHODS_WITHOUT_RQBODY{$xhdr->{method}} ) {
+	if ( ! defined $clen and $xhdr->{method} ne 'CONNECT') {
+	    # length not known -> chunking
+	    die "FIXME: chunking request body not yet supported";
+	}
+
 	my $hlen = length($hdr);
 	$self->{fixup_header}[0] = sub {
 	    my ($self,$hdr,%args) = @_;
