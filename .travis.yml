@@ -15,3 +15,5 @@ perl:
 sudo: required
 before_install:
   - sudo apt-get install libpcap-dev
+install:
+  - cpanm -v --installdeps --notest .
