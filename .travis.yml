@@ -12,3 +12,6 @@ perl:
   - "5.14"
   - "5.12"
   - "5.10"
+sudo: required
+before_install:
+  - sudo apt-get install libpcap-dev
